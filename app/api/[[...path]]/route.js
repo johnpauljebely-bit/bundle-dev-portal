@@ -8,20 +8,49 @@ const COOKIE_NAME = 'bundle_auth'
 const LEAD_ADMIN_DISCORD_ID = '1349737404449296414'
 const LEAD_ADMIN_NAME = 'Vance'
 
-let _client = null
-let _db = null
+// ============== MONGO CONNECTION (serverless-safe) ==============
+// Cache the connection promise on globalThis so warm Lambda/Vercel containers
+// reuse a single MongoClient across invocations. Module-level `let` is NOT
+// reliable across serverless cold starts and hot-reload.
+const MONGO_URL = process.env.MONGO_URL
+const DB_NAME = process.env.DB_NAME
+
+if (!MONGO_URL) {
+  console.error('FATAL: MONGO_URL env var is not set')
+}
+
+let _indexesReady = globalThis._bundleIndexesReady || false
+
 async function getDb() {
-  if (!_client) {
-    _client = new MongoClient(process.env.MONGO_URL)
-    await _client.connect()
-    _db = _client.db(process.env.DB_NAME)
-    try {
-      await _db.collection('users').createIndex({ discord_id: 1 }, { unique: true })
-      await _db.collection('feature_upvotes').createIndex({ feature_id: 1, user_id: 1 }, { unique: true })
-      await _db.collection('work_sessions').createIndex({ dev_id: 1, start_time: -1 })
-    } catch {}
+  if (!MONGO_URL) throw new Error('MONGO_URL is not configured')
+  if (!globalThis._bundleMongoClientPromise) {
+    const client = new MongoClient(MONGO_URL, {
+      maxPoolSize: 10,
+      minPoolSize: 0,
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+    })
+    globalThis._bundleMongoClientPromise = client.connect().catch(err => {
+      // Reset so the next request can retry
+      globalThis._bundleMongoClientPromise = null
+      throw err
+    })
   }
-  return _db
+  const client = await globalThis._bundleMongoClientPromise
+  const db = client.db(DB_NAME)
+  if (!_indexesReady) {
+    _indexesReady = true
+    globalThis._bundleIndexesReady = true
+    // Fire-and-forget index creation — idempotent, runs once per warm container
+    ;(async () => {
+      try {
+        await db.collection('users').createIndex({ discord_id: 1 }, { unique: true })
+        await db.collection('feature_upvotes').createIndex({ feature_id: 1, user_id: 1 }, { unique: true })
+        await db.collection('work_sessions').createIndex({ dev_id: 1, start_time: -1 })
+      } catch (e) { /* indexes likely already exist */ }
+    })()
+  }
+  return db
 }
 
 function signToken(user) {
@@ -352,8 +381,18 @@ async function handleRoute(request, { params }) {
       // ===== DISCORD OAUTH START =====
       if (seg[1] === 'discord' && seg[2] === 'start' && method === 'GET') {
         const clientId = process.env.DISCORD_CLIENT_ID
-        const redirectUri = process.env.DISCORD_REDIRECT_URI
-        if (!clientId || !redirectUri) return json({ error: 'Discord OAuth not configured' }, 500)
+        const clientSecret = process.env.DISCORD_CLIENT_SECRET
+        const origin = new URL(request.url).origin
+        const redirectUri = process.env.DISCORD_REDIRECT_URI || `${process.env.NEXT_PUBLIC_BASE_URL || origin}/api/auth/discord/callback`
+
+        const missing = []
+        if (!clientId) missing.push('DISCORD_CLIENT_ID')
+        if (!clientSecret) missing.push('DISCORD_CLIENT_SECRET')
+        if (missing.length > 0) {
+          const msg = `Discord OAuth env vars missing: ${missing.join(', ')}. Set them in Vercel → Project → Settings → Environment Variables.`
+          console.error(msg)
+          return NextResponse.redirect(`${process.env.NEXT_PUBLIC_BASE_URL || origin}/login?discord_error=not_configured&missing=${encodeURIComponent(missing.join(','))}`)
+        }
         const state = uuidv4()
         const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify&state=${state}&prompt=none`
         const res = NextResponse.redirect(oauthUrl)
@@ -365,35 +404,44 @@ async function handleRoute(request, { params }) {
       if (seg[1] === 'discord' && seg[2] === 'callback' && method === 'GET') {
         const code = q.code
         const state = q.state
-        const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || ''
+        const origin = new URL(request.url).origin
+        const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || origin
+        const clientId = process.env.DISCORD_CLIENT_ID
+        const clientSecret = process.env.DISCORD_CLIENT_SECRET
+        const redirectUri = process.env.DISCORD_REDIRECT_URI || `${baseUrl}/api/auth/discord/callback`
+
+        if (!clientId || !clientSecret) {
+          console.error('Discord OAuth callback: env vars missing (DISCORD_CLIENT_ID/SECRET). Set them in Vercel.')
+          return NextResponse.redirect(`${baseUrl}/login?discord_error=not_configured`)
+        }
+
         const cookieState = (request.headers.get('cookie') || '').match(/discord_oauth_state=([^;]+)/)?.[1]
         if (!code || !state || state !== cookieState) {
           return NextResponse.redirect(`${baseUrl}/login?discord_error=bad_state`)
         }
         try {
-          // Exchange code for access token
           const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: new URLSearchParams({
-              client_id: process.env.DISCORD_CLIENT_ID,
-              client_secret: process.env.DISCORD_CLIENT_SECRET,
+              client_id: clientId,
+              client_secret: clientSecret,
               grant_type: 'authorization_code',
               code,
-              redirect_uri: process.env.DISCORD_REDIRECT_URI,
+              redirect_uri: redirectUri,
             }),
           })
           if (!tokenRes.ok) {
+            const body = await tokenRes.text().catch(() => '')
+            console.error('Discord token exchange failed:', tokenRes.status, body)
             return NextResponse.redirect(`${baseUrl}/login?discord_error=token_exchange`)
           }
           const tokenData = await tokenRes.json()
-          // Fetch user info
           const meRes = await fetch('https://discord.com/api/users/@me', {
             headers: { Authorization: `Bearer ${tokenData.access_token}` },
           })
           if (!meRes.ok) return NextResponse.redirect(`${baseUrl}/login?discord_error=fetch_user`)
           const discordUser = await meRes.json()
-          // Look up by discord_id
           const dbUser = await db.collection('users').findOne({ discord_id: discordUser.id })
           if (!dbUser) {
             return NextResponse.redirect(`${baseUrl}/login?discord_error=no_account&discord_username=${encodeURIComponent(discordUser.username)}`)
@@ -401,12 +449,10 @@ async function handleRoute(request, { params }) {
           if (!dbUser.active) {
             return NextResponse.redirect(`${baseUrl}/login?discord_error=deactivated`)
           }
-          // Lanyard gate for devs only
           if (dbUser.role === 'developer') {
             const lOk = await checkLanyard(dbUser.discord_id)
             if (!lOk) return NextResponse.redirect(`${baseUrl}/login?discord_error=lanyard`)
           }
-          // Store Discord token (not used for anything yet, per requirement)
           await db.collection('users').updateOne({ id: dbUser.id }, { $set: {
             discord_access_token: tokenData.access_token,
             discord_refresh_token: tokenData.refresh_token,
@@ -420,7 +466,7 @@ async function handleRoute(request, { params }) {
           res.cookies.set('discord_oauth_state', '', { httpOnly: true, path: '/', maxAge: 0 })
           return res
         } catch (e) {
-          console.error('Discord OAuth callback error:', e?.message)
+          console.error('Discord OAuth callback error:', e?.message, e?.stack)
           return NextResponse.redirect(`${baseUrl}/login?discord_error=unexpected`)
         }
       }

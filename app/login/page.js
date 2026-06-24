@@ -50,6 +50,11 @@ function LoginInner() {
       setError('Your account has been deactivated. Contact an admin.')
     } else if (de === 'bad_state') {
       setError('OAuth session expired or invalid. Please try again.')
+    } else if (de === 'not_configured') {
+      const missing = params.get('missing') || 'Discord credentials'
+      setError(`Discord sign-in is not configured on this deployment. Missing env vars: ${missing}. Ask an admin to set them in Vercel.`)
+    } else if (de === 'token_exchange') {
+      setError('Discord token exchange failed. The OAuth app may be misconfigured (check redirect URI).')
     } else {
       setError('Discord sign-in failed. Please try again or use your password.')
     }
