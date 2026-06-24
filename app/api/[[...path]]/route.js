@@ -355,6 +355,148 @@ async function seedDemoData(db, me) {
   return { ok: true, users_created: usersCreated, features_created: featuresCreated, upvotes_created: upvotesCreated, notes_created: notesCreated, sessions_created: sessionsCreated, changelog_created: changelogCreated, demo_password: 'demo123', demo_users: demoUsers.map(d => ({ display_name: d.display_name, role: d.role })) }
 }
 
+// ============== WEEKLY RECAP ==============
+async function buildWeeklyRecap(db) {
+  const now = new Date()
+  const weekAgo = new Date(now.getTime() - 7 * 86400000)
+  const users = await db.collection('users').find({ active: true }).toArray()
+  const um = new Map(users.map(u => [u.id, u]))
+
+  // Hours by user in last 7d
+  const sessions = await db.collection('work_sessions').find({ start_time: { $gte: weekAgo }, end_time: { $ne: null } }).toArray()
+  const hoursByUser = {}
+  let totalMin = 0
+  for (const s of sessions) {
+    hoursByUser[s.dev_id] = (hoursByUser[s.dev_id] || 0) + (s.duration_minutes || 0)
+    totalMin += (s.duration_minutes || 0)
+  }
+  const top = Object.entries(hoursByUser).map(([id, min]) => ({ user: um.get(id), minutes: min })).filter(x => x.user).sort((a,b) => b.minutes - a.minutes).slice(0, 5)
+
+  // Shipped this week
+  const shipped = await db.collection('feature_requests').find({ status: 'shipped', updated_at: { $gte: weekAgo } }).toArray()
+  const newSubmitted = await db.collection('feature_requests').find({ created_at: { $gte: weekAgo } }).toArray()
+  const inProgress = await db.collection('feature_requests').find({ status: { $in: ['claimed', 'in_progress', 'in_review'] } }).toArray()
+
+  return { totalMin, top, shipped, newSubmitted, inProgress, weekAgo, now }
+}
+
+async function sendWeeklyRecap(db) {
+  const settings = await getSettings(db)
+  if (!settings.discord_webhook_url) return { error: 'No webhook configured' }
+  const recap = await buildWeeklyRecap(db)
+  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || ''
+  const totalHours = (recap.totalMin / 60).toFixed(1)
+  const fields = []
+  if (recap.top.length > 0) {
+    fields.push({
+      name: '🏆 Top contributors',
+      value: recap.top.map((t, i) => {
+        const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `#${i+1}`
+        return `${medal} **${t.user.display_name}** — ${(t.minutes/60).toFixed(1)}h`
+      }).join('\n'),
+      inline: false,
+    })
+  }
+  if (recap.shipped.length > 0) {
+    fields.push({
+      name: `🚢 Shipped (${recap.shipped.length})`,
+      value: recap.shipped.slice(0, 8).map(f => `• ${f.title}`).join('\n').slice(0, 1024),
+      inline: false,
+    })
+  }
+  if (recap.newSubmitted.length > 0) {
+    fields.push({
+      name: `✨ New requests (${recap.newSubmitted.length})`,
+      value: recap.newSubmitted.slice(0, 8).map(f => `• ${f.title}`).join('\n').slice(0, 1024),
+      inline: false,
+    })
+  }
+  if (recap.inProgress.length > 0) {
+    fields.push({
+      name: `🔨 In flight (${recap.inProgress.length})`,
+      value: recap.inProgress.slice(0, 8).map(f => `• ${f.title}`).join('\n').slice(0, 1024),
+      inline: false,
+    })
+  }
+  const body = {
+    username: 'Bundle Dev Portal',
+    embeds: [{
+      title: `📊 Bundle weekly recap`,
+      description: `**${totalHours}h** logged across the team this week.\n${recap.weekAgo.toLocaleDateString()} → ${recap.now.toLocaleDateString()}`,
+      color: 6011838, // bundle blurple-ish
+      url: `${baseUrl}/dashboard`,
+      fields,
+      footer: { text: 'Bundle Dev Portal' },
+      timestamp: recap.now.toISOString(),
+    }]
+  }
+  try {
+    const r = await fetch(settings.discord_webhook_url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    if (!r.ok) return { error: `Discord returned ${r.status}` }
+    await db.collection('settings').updateOne({ id: 'app-settings' }, { $set: { last_recap_sent_at: new Date() } })
+    return { ok: true, totals: { total_minutes: recap.totalMin, shipped: recap.shipped.length, new: recap.newSubmitted.length, in_progress: recap.inProgress.length } }
+  } catch (e) {
+    return { error: e.message }
+  }
+}
+
+async function maybeSendScheduledRecap(db) {
+  // Lazy cron — fire-and-forget. Sends if it's been 7+ days since last send and weekly_recap_enabled is true.
+  try {
+    const s = await getSettings(db)
+    if (!s.weekly_recap_enabled || !s.discord_webhook_url || !s.notifications_enabled) return
+    const last = s.last_recap_sent_at ? new Date(s.last_recap_sent_at) : null
+    const now = new Date()
+    if (last && (now - last) < 7 * 86400000) return
+    // Only auto-send on Mondays (UTC) — avoids weekend spam if first install
+    if (now.getUTCDay() !== 1) return
+    await sendWeeklyRecap(db)
+  } catch (e) {
+    console.error('Auto recap failed:', e?.message)
+  }
+}
+
+// ============== MENTION PARSING ==============
+function parseMentions(noteText, users) {
+  if (!noteText || !users || users.length === 0) return []
+  const mentioned = []
+  const sorted = [...users].sort((a,b) => b.display_name.length - a.display_name.length)
+  for (const u of sorted) {
+    const escaped = u.display_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const re = new RegExp(`@${escaped}(?=\\s|$|[.,!?;:])`, 'i')
+    if (re.test(noteText)) mentioned.push(u)
+  }
+  return mentioned
+}
+
+function notifyMention(db, { feature, note, actor, mentionedUsers }) {
+  ;(async () => {
+    try {
+      const settings = await getSettings(db)
+      if (!settings.notifications_enabled || !settings.discord_webhook_url) return
+      if (mentionedUsers.length === 0) return
+      const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || ''
+      const pingContent = mentionedUsers.map(u => `<@${u.discord_id}>`).join(' ')
+      const body = {
+        username: 'Bundle Dev Portal',
+        content: pingContent,
+        allowed_mentions: { parse: ['users'], users: mentionedUsers.map(u => u.discord_id) },
+        embeds: [{
+          title: `💬 New mention in: ${feature.title}`,
+          description: `**${actor.display_name}** wrote:\n\n>>> ${note.length > 800 ? note.slice(0, 800) + '…' : note}`,
+          color: 5793266,
+          url: `${baseUrl}/features/${feature.id}`,
+          footer: { text: `In feature: ${feature.title}` },
+          timestamp: new Date().toISOString(),
+        }]
+      }
+      await fetch(settings.discord_webhook_url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    } catch (e) {
+      console.error('Mention webhook failed:', e?.message)
+    }
+  })()
+}
+
 async function handleRoute(request, { params }) {
   const { path = [] } = await params
   const method = request.method
@@ -580,9 +722,15 @@ async function handleRoute(request, { params }) {
       if (seg[1] && seg[2] === 'notes' && method === 'POST') {
         const { note } = await request.json()
         if (!note) return json({ error: 'missing note' }, 400)
-        const n = { id: uuidv4(), feature_id: seg[1], dev_id: me.id, note, created_at: new Date() }
+        const allUsers = await db.collection('users').find({ active: true }).toArray()
+        const mentionedUsers = parseMentions(note, allUsers)
+        const n = { id: uuidv4(), feature_id: seg[1], dev_id: me.id, note, mentioned_user_ids: mentionedUsers.map(u => u.id), created_at: new Date() }
         await db.collection('feature_notes').insertOne({ ...n })
-        return json({ note: n })
+        if (mentionedUsers.length > 0) {
+          const feature = await db.collection('feature_requests').findOne({ id: seg[1] })
+          if (feature) notifyMention(db, { feature, note, actor: me, mentionedUsers })
+        }
+        return json({ note: n, mentioned: mentionedUsers.map(u => ({ id: u.id, display_name: u.display_name })) })
       }
     }
 
@@ -745,6 +893,7 @@ async function handleRoute(request, { params }) {
     if (seg[0] === 'overview' && method === 'GET') {
       if (!isAdmin) return json({ error: 'forbidden' }, 403)
       await autoCleanupStaleSessions(db)
+      maybeSendScheduledRecap(db)  // lazy cron — fire-and-forget
       const now = new Date()
       const sow = new Date(); sow.setDate(now.getDate() - now.getDay()); sow.setHours(0,0,0,0)
       const som = new Date(now.getFullYear(), now.getMonth(), 1)
@@ -772,6 +921,7 @@ async function handleRoute(request, { params }) {
         const update = {}
         if (typeof body.discord_webhook_url === 'string') update.discord_webhook_url = body.discord_webhook_url
         if (typeof body.notifications_enabled === 'boolean') update.notifications_enabled = body.notifications_enabled
+        if (typeof body.weekly_recap_enabled === 'boolean') update.weekly_recap_enabled = body.weekly_recap_enabled
         await db.collection('settings').updateOne({ id: 'app-settings' }, { $set: update }, { upsert: true })
         const s = await getSettings(db)
         return json({ settings: s })
@@ -798,6 +948,15 @@ async function handleRoute(request, { params }) {
         } catch (e) {
           return json({ error: e.message }, 500)
         }
+      }
+      if (seg[1] === 'send-recap' && method === 'POST') {
+        const r = await sendWeeklyRecap(db)
+        if (r.error) return json({ error: r.error }, 400)
+        return json(r)
+      }
+      if (seg[1] === 'recap-preview' && method === 'GET') {
+        const r = await buildWeeklyRecap(db)
+        return json({ total_minutes: r.totalMin, total_hours: +(r.totalMin/60).toFixed(1), top: r.top.map(t => ({ display_name: t.user.display_name, minutes: t.minutes })), shipped_count: r.shipped.length, new_count: r.newSubmitted.length, in_progress_count: r.inProgress.length, shipped_titles: r.shipped.map(f => f.title), new_titles: r.newSubmitted.map(f => f.title) })
       }
     }
 

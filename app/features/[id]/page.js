@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { AppShell, useMe } from '@/components/AppShell'
 import { LanyardAvatar } from '@/components/LanyardCard'
+import { MentionTextarea, renderNoteWithMentions } from '@/components/MentionTextarea'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -30,6 +31,8 @@ function Content() {
   const { data: featData, mutate: refresh } = useSWR(id ? `/api/features/${id}` : null, fetcher, { refreshInterval: 20000 })
   const { data: notesData, mutate: refreshNotes } = useSWR(id ? `/api/features/${id}/notes` : null, fetcher)
   const { data: upvotersData } = useSWR(id ? `/api/features/${id}/upvoters` : null, fetcher)
+  const { data: usersData } = useSWR('/api/users', fetcher)
+  const allUsers = (usersData?.users || []).filter(u => u.active)
   const [note, setNote] = useState('')
   const [posting, setPosting] = useState(false)
 
@@ -128,17 +131,17 @@ function Content() {
                       <span className="font-medium text-sm">{n.dev_name}</span>
                       <span className="text-xs text-muted-foreground">{new Date(n.created_at).toLocaleString()}</span>
                     </div>
-                    <p className="text-sm text-foreground/90 whitespace-pre-wrap">{n.note}</p>
+                    <p className="text-sm text-foreground/90 whitespace-pre-wrap leading-relaxed">{renderNoteWithMentions(n.note, allUsers, Link)}</p>
                   </div>
                 </div>
               ))}
             </div>
             <div className="px-5 py-4 border-t border-border bg-secondary/20">
-              <div className="flex gap-2">
-                <Textarea value={note} onChange={e => setNote(e.target.value)} placeholder="Share a progress update or comment…" rows={2} className="flex-1 resize-none" onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') addNote() }} />
+              <div className="flex gap-2 items-end">
+                <MentionTextarea value={note} onChange={setNote} placeholder="Share a progress update… type @ to mention a teammate" rows={2} onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') addNote() }} />
                 <Button onClick={addNote} disabled={posting || !note.trim()} className="self-end"><Send className="h-4 w-4" /></Button>
               </div>
-              <div className="text-[10px] text-muted-foreground mt-1.5">⌘/Ctrl + Enter to post</div>
+              <div className="text-[10px] text-muted-foreground mt-1.5">⌘/Ctrl + Enter to post • @ to mention</div>
             </div>
           </Card>
         </div>

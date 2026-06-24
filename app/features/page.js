@@ -13,7 +13,7 @@ import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuLabel } from '@/components/ui/dropdown-menu'
-import { ChevronUp, MoreHorizontal, Plus, Pin, Trash2, MessageSquare, Filter, Search } from 'lucide-react'
+import { ChevronUp, MoreHorizontal, Plus, Pin, Trash2, MessageSquare, Filter, Search, Archive, Layers, List } from 'lucide-react'
 import { BUNDLE_MODULES, PRIORITIES, STATUSES, PRIORITY_COLORS, STATUS_COLORS, STATUS_LABELS } from '@/lib/constants/modules'
 import { toast } from 'sonner'
 
@@ -34,11 +34,17 @@ function FeaturesContent() {
   const [filterClaim, setFilterClaim] = useState('all')
   const [sort, setSort] = useState('newest')
   const [search, setSearch] = useState('')
+  const [view, setView] = useState('active') // 'active' | 'archive' | 'all'
   const [openNew, setOpenNew] = useState(false)
   const isAdmin = me?.role === 'admin' || me?.role === 'lead_admin'
 
+  const activeCount = features.filter(f => !['shipped','rejected'].includes(f.status)).length
+  const archiveCount = features.filter(f => ['shipped','rejected'].includes(f.status)).length
+
   const filtered = useMemo(() => {
     let arr = [...features]
+    if (view === 'active') arr = arr.filter(f => !['shipped','rejected'].includes(f.status))
+    else if (view === 'archive') arr = arr.filter(f => ['shipped','rejected'].includes(f.status))
     if (filterStatus !== 'all') arr = arr.filter(f => f.status === filterStatus)
     if (filterPriority !== 'all') arr = arr.filter(f => f.priority === filterPriority)
     if (filterModule !== 'all') arr = arr.filter(f => f.module === filterModule)
@@ -63,7 +69,7 @@ function FeaturesContent() {
     // pinned always first
     arr.sort((a,b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0))
     return arr
-  }, [features, filterStatus, filterPriority, filterModule, filterClaim, sort, search])
+  }, [features, filterStatus, filterPriority, filterModule, filterClaim, sort, search, view])
 
   async function upvote(id) {
     await fetch(`/api/features/${id}/upvote`, { method: 'POST' })
@@ -90,12 +96,18 @@ function FeaturesContent() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold">Feature Requests</h1>
-          <p className="text-sm text-muted-foreground">{features.length} total — {features.filter(f => !f.claimed_by).length} unclaimed</p>
+          <p className="text-sm text-muted-foreground">{features.length} total — {features.filter(f => !f.claimed_by && !['shipped','rejected'].includes(f.status)).length} unclaimed</p>
         </div>
         <Dialog open={openNew} onOpenChange={setOpenNew}>
           <DialogTrigger asChild><Button><Plus className="h-4 w-4 mr-2" /> New Request</Button></DialogTrigger>
           <NewFeatureDialog onCreated={() => { setOpenNew(false); mutate() }} />
         </Dialog>
+      </div>
+
+      <div className="flex items-center gap-1 border-b border-border">
+        <ViewTab active={view === 'active'} onClick={() => setView('active')} icon={<Layers className="h-4 w-4" />} label="Active" count={activeCount} />
+        <ViewTab active={view === 'archive'} onClick={() => setView('archive')} icon={<Archive className="h-4 w-4" />} label="Archive" count={archiveCount} />
+        <ViewTab active={view === 'all'} onClick={() => setView('all')} icon={<List className="h-4 w-4" />} label="All" count={features.length} />
       </div>
 
       <Card className="p-3 space-y-2">
@@ -262,5 +274,19 @@ function FeatureNotesButton({ feature, me }) {
         </div>
       </DialogContent>
     </Dialog>
+  )
+}
+
+
+function ViewTab({ active, onClick, icon, label, count }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px ${active ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`}
+    >
+      {icon}
+      {label}
+      <span className={`text-[10px] px-1.5 py-0.5 rounded ${active ? 'bg-primary/20 text-primary' : 'bg-secondary text-muted-foreground'}`}>{count}</span>
+    </button>
   )
 }

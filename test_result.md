@@ -276,7 +276,51 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: |
-      ### Iteration 3 — Discord webhooks + Feature search + Per-dev goals editor
+      ### Iteration 4 — Weekly recap + Archive view + @mention support + Random sign-out bug fix
+
+      **Bug fix — random sign-outs:**
+      Root cause was in `components/AppShell.js`: the `useMe` SWR fetcher threw on
+      ANY non-2xx response (including transient 5xx and network failures), and the
+      shell unconditionally redirected to `/login` on any error. Combined with the
+      Next.js dev server's periodic memory-threshold restarts, this booted users
+      mid-session. Fix:
+        - New `authFetcher` distinguishes hard 401 (logged out) from transient
+          errors via `err.status` / `err.transient`
+        - Redirect logic only fires on `error?.status === 401`
+        - SWR config: `shouldRetryOnError: err => err?.transient`, 5 retries with
+          1.5s backoff, `dedupingInterval: 30s`, `revalidateOnFocus: false`,
+          `revalidateOnReconnect: false`
+      JWT was already 30d, cookie was already httpOnly+SameSite=lax+Secure, so
+      those weren't the cause. Lanyard is also only checked on initial login,
+      never on subsequent requests — verified.
+
+      **New features:**
+      1. **Weekly recap** — Builder helper, three endpoints:
+         - GET  /api/settings/recap-preview  → live counts/top contributors
+         - POST /api/settings/send-recap     → fires recap to Discord, stamps last_recap_sent_at
+         - Lazy cron `maybeSendScheduledRecap()` invoked from /overview — auto-fires
+           on Mondays (UTC) if 7+ days since last send AND `weekly_recap_enabled`
+           is true. Discord embed includes: total team hours, top 5 contributors
+           with medals, shipped titles, new requests, in-flight features.
+      2. **Archive view on /features** — Three view tabs at top of features wall:
+         Active (default, excludes shipped+rejected), Archive (only shipped+
+         rejected), All. Stacks with existing search/filter/sort. Each tab has
+         a live count badge.
+      3. **@mention support in feature notes** — New `MentionTextarea` component
+         with `@` autocomplete dropdown (filtered live, ArrowUp/Down/Enter to
+         select, Esc/Tab to dismiss). Backend `parseMentions()` matches `@DisplayName`
+         (handles names with spaces, word-boundary). Mentions are stored as
+         `mentioned_user_ids` on the note doc. `notifyMention()` fires a Discord
+         webhook with `<@discord_id>` content + embed so mentioned users get an
+         actual ping in Discord (uses `allowed_mentions` for safety). On render,
+         `renderNoteWithMentions()` converts `@DisplayName` matches into clickable
+         Blurple pills that link to `/devs/{id}`.
+
+      Verified via curl + screenshots:
+        - Recap preview returns 54.4h total, top 5 contributors, 0/4/6 counts
+        - @Alex Chen + @Phineas in a note both resolved to user IDs
+        - Send-recap fails gracefully with "No webhook configured" when URL missing
+        - Auth resilience confirmed (no sign-out on transient errors anymore)
 
       1. **Discord webhook notifications** — New `settings` collection (single
          app-settings doc). Endpoints:

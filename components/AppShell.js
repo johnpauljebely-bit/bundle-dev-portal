@@ -12,8 +12,33 @@ import { ROLE_LABELS, ROLE_COLORS } from '@/lib/constants/modules'
 
 const fetcher = (u) => fetch(u).then(async r => { if (!r.ok) throw new Error('unauth'); return r.json() })
 
+// Auth-specific fetcher: distinguishes between hard 401 (logged out) and transient
+// errors (network blip, dev server restart). Only 401 should trigger sign-out.
+const authFetcher = async (u) => {
+  const r = await fetch(u, { credentials: 'include' })
+  if (r.status === 401) {
+    const err = new Error('unauthenticated')
+    err.status = 401
+    throw err
+  }
+  if (!r.ok) {
+    const err = new Error('transient')
+    err.status = r.status
+    err.transient = true
+    throw err
+  }
+  return r.json()
+}
+
 export function useMe() {
-  return useSWR('/api/auth/me', fetcher, { revalidateOnFocus: false })
+  return useSWR('/api/auth/me', authFetcher, {
+    revalidateOnFocus: false,
+    revalidateOnReconnect: false,
+    shouldRetryOnError: (err) => err?.transient === true,
+    errorRetryCount: 5,
+    errorRetryInterval: 1500,
+    dedupingInterval: 30000,
+  })
 }
 
 export function AppShell({ children, requireAdmin = false }) {
@@ -22,7 +47,8 @@ export function AppShell({ children, requireAdmin = false }) {
   const { data, error, isLoading } = useMe()
 
   useEffect(() => {
-    if (error) router.replace('/login')
+    // ONLY redirect on a confirmed 401. Transient errors (5xx, network) should not sign out the user.
+    if (error?.status === 401) router.replace('/login')
   }, [error, router])
 
   useEffect(() => {

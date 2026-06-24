@@ -14,7 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, Dialog
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuLabel, DropdownMenuSeparator } from '@/components/ui/dropdown-menu'
 import { Switch } from '@/components/ui/switch'
-import { Plus, MoreHorizontal, Download, Trash2, KeyRound, UserX, UserCheck, Pin, Shield, Target, Webhook, CheckCircle2, Send } from 'lucide-react'
+import { Plus, MoreHorizontal, Download, Trash2, KeyRound, UserX, UserCheck, Pin, Shield, Target, Webhook, CheckCircle2, Send, CalendarDays } from 'lucide-react'
 import { BUNDLE_MODULES, PRIORITIES, STATUSES, PRIORITY_COLORS, STATUS_COLORS, STATUS_LABELS, ROLE_LABELS, ROLE_COLORS } from '@/lib/constants/modules'
 import { toast } from 'sonner'
 
@@ -444,23 +444,26 @@ function NewChangelogDialog({ shippedFeatures, onCreated }) {
 
 function SettingsTab() {
   const { data, mutate } = useSWR('/api/settings', fetcher)
+  const { data: recapPreview } = useSWR('/api/settings/recap-preview', fetcher, { refreshInterval: 60000 })
   const s = data?.settings
   const [url, setUrl] = useState('')
   const [enabled, setEnabled] = useState(true)
+  const [recapEnabled, setRecapEnabled] = useState(false)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [sendingRecap, setSendingRecap] = useState(false)
 
-  // Sync state when settings load
   useEffect(() => {
     if (s) {
       setUrl(s.discord_webhook_url || '')
       setEnabled(s.notifications_enabled !== false)
+      setRecapEnabled(s.weekly_recap_enabled === true)
     }
-  }, [s?.discord_webhook_url, s?.notifications_enabled])
+  }, [s?.discord_webhook_url, s?.notifications_enabled, s?.weekly_recap_enabled])
 
   async function save() {
     setSaving(true)
-    const r = await fetch('/api/settings', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ discord_webhook_url: url.trim(), notifications_enabled: enabled }) })
+    const r = await fetch('/api/settings', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ discord_webhook_url: url.trim(), notifications_enabled: enabled, weekly_recap_enabled: recapEnabled }) })
     setSaving(false)
     if (r.ok) { toast.success('Settings saved'); mutate() } else { toast.error('Failed to save') }
   }
@@ -471,6 +474,16 @@ function SettingsTab() {
     if (r.ok) toast.success('Test message sent to Discord ✓')
     else { const d = await r.json(); toast.error(d.error || 'Test failed') }
   }
+  async function sendRecap() {
+    setSendingRecap(true)
+    const r = await fetch('/api/settings/send-recap', { method: 'POST' })
+    setSendingRecap(false)
+    if (r.ok) { toast.success('Weekly recap posted to Discord ✓'); mutate() }
+    else { const d = await r.json(); toast.error(d.error || 'Recap failed') }
+  }
+
+  const lastSent = s?.last_recap_sent_at ? new Date(s.last_recap_sent_at) : null
+  const daysSince = lastSent ? Math.floor((Date.now() - lastSent.getTime()) / 86400000) : null
 
   return (
     <div className="space-y-4 mt-4">
@@ -505,8 +518,49 @@ function SettingsTab() {
               <li>↩️ Feature unclaimed</li>
               <li>🔨 Status changed (Pending → Claimed → In Progress → In Review → Shipped/Rejected)</li>
               <li>📌 Feature pinned by an admin</li>
+              <li>💬 Someone is @mentioned in a feature note</li>
             </ul>
           </Card>
+        </div>
+      </Card>
+
+      <Card className="p-6">
+        <div className="flex items-center gap-3 mb-1">
+          <CalendarDays className="h-5 w-5 text-primary" />
+          <h2 className="text-base font-semibold">Weekly Recap</h2>
+        </div>
+        <p className="text-sm text-muted-foreground mb-5">Auto-post a team summary every Monday so the whole team knows what shipped, who logged the most hours, and what&apos;s in flight — without anyone having to log in.</p>
+        <div className="space-y-4">
+          <div className="flex items-center justify-between p-3 rounded-md bg-secondary/40 border border-border">
+            <div>
+              <div className="text-sm font-medium">Auto-post every Monday</div>
+              <div className="text-xs text-muted-foreground">{lastSent ? `Last sent ${daysSince === 0 ? 'today' : `${daysSince} day${daysSince === 1 ? '' : 's'} ago`} (${lastSent.toLocaleString()})` : 'Never sent automatically yet'}</div>
+            </div>
+            <Switch checked={recapEnabled} onCheckedChange={setRecapEnabled} />
+          </div>
+          {recapPreview && (
+            <Card className="p-4 bg-secondary/30 border-border">
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Preview — last 7 days</div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <div><div className="text-muted-foreground text-xs">Total hours</div><div className="text-lg font-bold">{recapPreview.total_hours}h</div></div>
+                <div><div className="text-muted-foreground text-xs">Shipped</div><div className="text-lg font-bold">{recapPreview.shipped_count}</div></div>
+                <div><div className="text-muted-foreground text-xs">New requests</div><div className="text-lg font-bold">{recapPreview.new_count}</div></div>
+                <div><div className="text-muted-foreground text-xs">In flight</div><div className="text-lg font-bold">{recapPreview.in_progress_count}</div></div>
+              </div>
+              {recapPreview.top?.length > 0 && (
+                <div className="mt-3 pt-3 border-t border-border">
+                  <div className="text-xs text-muted-foreground mb-1.5">Top contributors</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {recapPreview.top.map((t, i) => <Badge key={i} variant="outline">{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `#${i+1}`} {t.display_name} · {(t.minutes/60).toFixed(1)}h</Badge>)}
+                  </div>
+                </div>
+              )}
+            </Card>
+          )}
+          <div className="flex items-center gap-2">
+            <Button onClick={sendRecap} disabled={sendingRecap || !s?.discord_webhook_url}><Send className="h-4 w-4 mr-2" />{sendingRecap ? 'Sending…' : 'Send recap now'}</Button>
+            {!s?.discord_webhook_url && <span className="text-xs text-muted-foreground">Configure a webhook URL above first</span>}
+          </div>
         </div>
       </Card>
     </div>
