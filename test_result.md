@@ -276,9 +276,35 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: |
-      Bundle Dev Portal MVP complete end-to-end. Backend uses MongoDB (not Supabase) per user
-      decision. Lead admin Vance is hardcoded and auto-seeded on first login via env var.
-      Please run comprehensive backend tests:
+      ### Iteration 2 — Demo seed + Per-feature page + Auto-stop 12h
+      Built on top of the MVP. Three new capabilities, all verified working:
+
+      1. **Demo seed endpoint** — POST /api/admin/seed (lead_admin only, idempotent).
+         Creates 6 users (Maya Vega + Theo Park as admins; Phineas, Alex Chen, Jordan
+         Rivers, Sam Patel as devs — Phineas uses the real Lanyard creator's Discord ID
+         156114103033790464 so his avatar/presence resolve), 10 features across all
+         modules and statuses (incl. 2 pinned), 24 upvotes, 5 progress notes, 24 work
+         sessions across last 14 days, 1 currently-active session for Phineas, and 3
+         changelog entries with version tags. Demo password for all seeded users:
+         "demo123". Endpoint returns counts.
+
+      2. **Per-feature page** — /features/[id]. New endpoints:
+         - GET /api/features/:id (single feature, enriched with submitter/claimer/upvote_count)
+         - GET /api/features/:id/upvoters (array of users who upvoted)
+         Page shows full description, status/priority/pinned actions (gated by role),
+         discussion timeline (using existing feature_notes API), upvoters grid with
+         Lanyard avatars, sidebar with submitter + claimer cards. Feature cards on
+         /features now link to the detail page.
+
+      3. **Auto-stop after 12h** — autoCleanupStaleSessions() runs at the start of every
+         /sessions, /stats, /overview endpoint. Any session with end_time=null and
+         start_time older than 12h is automatically closed: end_time set to start+12h,
+         duration_minutes=720, manual=true, manual_reason="Auto-stopped after 12h
+         (forgot to clock out)". Verified with manual mongo insert: a session inserted
+         13h in the past was correctly auto-closed on the very next /api/sessions call.
+
+      No regressions expected to prior backend tests. Seed endpoint and new GET endpoints
+      should be added to test plan if a re-test is requested by user.
         1. POST /api/auth/login with lead admin {identifier:"Vance", password:"SpotifyPremium"}
            → should set bundle_auth httpOnly cookie + return user role=lead_admin
         2. Also try identifier="1349737404449296414" — should work the same way

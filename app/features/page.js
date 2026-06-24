@@ -99,7 +99,7 @@ function FeaturesContent() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {filtered.map(f => (
-          <Card key={f.id} className={`p-5 flex flex-col gap-3 ${f.pinned ? 'border-primary/40 bg-primary/5' : ''}`}>
+          <Card key={f.id} className={`p-5 flex flex-col gap-3 transition-colors hover:border-primary/40 ${f.pinned ? 'border-primary/40 bg-primary/5' : ''}`}>
             <div className="flex items-start justify-between gap-2">
               <div className="flex items-center gap-1.5 flex-wrap">
                 {f.pinned && <Badge variant="outline" className="text-primary border-primary/40"><Pin className="h-3 w-3 mr-1" /> Pinned</Badge>}
@@ -108,10 +108,10 @@ function FeaturesContent() {
               </div>
               <FeatureMenu feature={f} me={me} isAdmin={isAdmin} onUpdate={updateFeature} onDelete={deleteFeature} />
             </div>
-            <div>
-              <div className="font-semibold text-base leading-snug">{f.title}</div>
+            <Link href={`/features/${f.id}`} className="group block">
+              <div className="font-semibold text-base leading-snug group-hover:text-primary transition-colors">{f.title}</div>
               <p className="text-sm text-muted-foreground mt-1.5 line-clamp-3">{f.description}</p>
-            </div>
+            </Link>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Badge variant="secondary" className="text-[10px]">{f.module}</Badge>
               <span>•</span>

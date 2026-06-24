@@ -75,6 +75,21 @@ function clearCookie(res) {
   return res
 }
 
+const STALE_SESSION_HOURS = 12
+
+async function autoCleanupStaleSessions(db) {
+  const cutoff = new Date(Date.now() - STALE_SESSION_HOURS * 3600 * 1000)
+  const stale = await db.collection('work_sessions').find({ end_time: null, start_time: { $lt: cutoff } }).toArray()
+  for (const s of stale) {
+    const start = new Date(s.start_time)
+    const end = new Date(start.getTime() + STALE_SESSION_HOURS * 3600 * 1000)
+    await db.collection('work_sessions').updateOne(
+      { id: s.id },
+      { $set: { end_time: end, duration_minutes: STALE_SESSION_HOURS * 60, manual: true, manual_reason: `Auto-stopped after ${STALE_SESSION_HOURS}h (forgot to clock out)` } }
+    )
+  }
+}
+
 async function checkLanyard(discord_id) {
   try {
     const r = await fetch(`https://api.lanyard.rest/v1/users/${discord_id}`, { cache: 'no-store' })
@@ -83,6 +98,174 @@ async function checkLanyard(discord_id) {
     const d = await r.json()
     return d?.success === true
   } catch { return true }
+}
+
+// ============== DEMO DATA SEED ==============
+async function seedDemoData(db, me) {
+  // Demo users — passwords all "demo123"
+  const demoUsers = [
+    { discord_id: '111111111111111111', display_name: 'Maya Vega', role: 'admin' },
+    { discord_id: '222222222222222222', display_name: 'Theo Park', role: 'admin' },
+    { discord_id: '156114103033790464', display_name: 'Phineas', role: 'developer' }, // real Lanyard user
+    { discord_id: '333333333333333333', display_name: 'Alex Chen', role: 'developer' },
+    { discord_id: '444444444444444444', display_name: 'Jordan Rivers', role: 'developer' },
+    { discord_id: '555555555555555555', display_name: 'Sam Patel', role: 'developer' },
+  ]
+  const passwordHash = await bcrypt.hash('demo123', 10)
+  const userIds = {}
+  let usersCreated = 0
+  for (const du of demoUsers) {
+    const existing = await db.collection('users').findOne({ discord_id: du.discord_id })
+    if (existing) { userIds[du.display_name] = existing.id; continue }
+    const id = uuidv4()
+    await db.collection('users').insertOne({
+      id, discord_id: du.discord_id, display_name: du.display_name, password_hash: passwordHash,
+      role: du.role, active: true, daily_goal: 4, weekly_goal: 25, created_at: new Date()
+    })
+    userIds[du.display_name] = id
+    usersCreated++
+  }
+  userIds['Vance'] = me.id
+
+  // Demo features
+  const now = new Date()
+  const daysAgo = (n) => new Date(now.getTime() - n * 86400000)
+  const demoFeatures = [
+    { title: 'Ban appeals modal', description: 'Add a modal so banned users can submit appeals through a dedicated DM flow. Should support form fields, attachments, and reviewer notifications.', module: 'Moderation', priority: 'high', status: 'shipped', submitter: 'Maya Vega', claimer: 'Alex Chen', pinned: false, age: 22 },
+    { title: '/ticket transcript download', description: 'When a ticket is closed, allow staff to download the full transcript as HTML with embedded attachments and user avatars.', module: 'Tickets', priority: 'critical', status: 'in_progress', submitter: 'Theo Park', claimer: 'Phineas', pinned: true, age: 8 },
+    { title: 'Welcome message variables', description: 'Add support for {server.boost_count}, {member.account_age}, and {server.name} variables in welcome messages.', module: 'Welcomer', priority: 'medium', status: 'claimed', submitter: 'Phineas', claimer: 'Jordan Rivers', pinned: false, age: 4 },
+    { title: 'Daily login streak rewards', description: 'Reward users with bonus coins for consecutive daily check-ins. Streak resets after missing a day. Configurable rewards per streak milestone.', module: 'Economy', priority: 'high', status: 'in_review', submitter: 'Maya Vega', claimer: 'Alex Chen', pinned: false, age: 14 },
+    { title: 'Auto-react polls', description: 'When admins create a poll, the bot should auto-react with the configured emojis instead of needing a separate command.', module: 'Polls', priority: 'low', status: 'pending', submitter: 'Sam Patel', claimer: null, pinned: false, age: 2 },
+    { title: 'Music queue history', description: 'Track the last 50 songs played per server and expose a /history command to view + requeue past tracks.', module: 'Music', priority: 'medium', status: 'pending', submitter: 'Jordan Rivers', claimer: null, pinned: false, age: 5 },
+    { title: 'XP boost shop item', description: 'Let users spend coins on temporary XP boosts (2x for 1h, 3x for 30min, etc.) in the economy shop.', module: 'Leveling', priority: 'medium', status: 'shipped', submitter: 'Alex Chen', claimer: 'Phineas', pinned: false, age: 18 },
+    { title: 'Anti-raid threshold tuner', description: 'Expose UI controls for raid detection sensitivity: join velocity, account age threshold, and similarity heuristics.', module: 'Automod', priority: 'high', status: 'claimed', submitter: 'Theo Park', claimer: 'Sam Patel', pinned: false, age: 6 },
+    { title: 'Reaction role groups', description: 'Group reaction roles so users can only pick one per group (radio behaviour). Useful for pronoun roles, region picker, etc.', module: 'Reaction Roles', priority: 'critical', status: 'in_progress', submitter: 'Maya Vega', claimer: 'Jordan Rivers', pinned: true, age: 11 },
+    { title: 'Starboard ignore channels', description: 'Add channel-level ignore list so messages from NSFW or staff-only channels never get starred.', module: 'Starboard', priority: 'low', status: 'rejected', submitter: 'Sam Patel', claimer: null, pinned: false, age: 9 },
+  ]
+  let featuresCreated = 0
+  const featureIds = {}
+  for (const df of demoFeatures) {
+    const existing = await db.collection('feature_requests').findOne({ title: df.title })
+    if (existing) { featureIds[df.title] = existing.id; continue }
+    const id = uuidv4()
+    const createdAt = daysAgo(df.age)
+    await db.collection('feature_requests').insertOne({
+      id, title: df.title, description: df.description, module: df.module,
+      priority: df.priority, status: df.status,
+      submitted_by: userIds[df.submitter], claimed_by: df.claimer ? userIds[df.claimer] : null,
+      pinned: df.pinned, created_at: createdAt, updated_at: daysAgo(Math.max(0, df.age - 2))
+    })
+    featureIds[df.title] = id
+    featuresCreated++
+  }
+
+  // Upvotes — random distribution
+  const allUsers = Object.values(userIds)
+  const upvotePlan = {
+    '/ticket transcript download': ['Maya Vega', 'Phineas', 'Alex Chen', 'Sam Patel', 'Jordan Rivers'],
+    'Ban appeals modal': ['Theo Park', 'Phineas', 'Sam Patel'],
+    'Reaction role groups': ['Vance', 'Maya Vega', 'Alex Chen', 'Sam Patel'],
+    'Welcome message variables': ['Theo Park'],
+    'Daily login streak rewards': ['Vance', 'Phineas', 'Sam Patel'],
+    'Music queue history': ['Alex Chen', 'Sam Patel'],
+    'XP boost shop item': ['Maya Vega', 'Jordan Rivers', 'Theo Park'],
+    'Anti-raid threshold tuner': ['Vance', 'Phineas'],
+    'Auto-react polls': ['Jordan Rivers'],
+  }
+  let upvotesCreated = 0
+  for (const [title, voterNames] of Object.entries(upvotePlan)) {
+    const fid = featureIds[title]
+    if (!fid) continue
+    for (const vn of voterNames) {
+      const uid = userIds[vn]
+      if (!uid) continue
+      const exists = await db.collection('feature_upvotes').findOne({ feature_id: fid, user_id: uid })
+      if (exists) continue
+      await db.collection('feature_upvotes').insertOne({ id: uuidv4(), feature_id: fid, user_id: uid, created_at: new Date() })
+      upvotesCreated++
+    }
+  }
+
+  // Notes on claimed features
+  const notePlan = [
+    { title: '/ticket transcript download', author: 'Phineas', note: 'Got the HTML export working locally. Now wiring up attachment downloads.' },
+    { title: '/ticket transcript download', author: 'Phineas', note: 'Embedded avatars added. Testing edge cases with deleted users.' },
+    { title: 'Daily login streak rewards', author: 'Alex Chen', note: 'Schema migration done. Pushing to staging for review.' },
+    { title: 'Reaction role groups', author: 'Jordan Rivers', note: 'Radio behaviour implemented. Need to handle migration of existing reaction roles.' },
+    { title: 'Anti-raid threshold tuner', author: 'Sam Patel', note: 'Starting on the UI controls. Backend already supports per-server thresholds.' },
+  ]
+  let notesCreated = 0
+  for (const np of notePlan) {
+    const fid = featureIds[np.title]
+    const uid = userIds[np.author]
+    if (!fid || !uid) continue
+    const exists = await db.collection('feature_notes').findOne({ feature_id: fid, dev_id: uid, note: np.note })
+    if (exists) continue
+    await db.collection('feature_notes').insertOne({ id: uuidv4(), feature_id: fid, dev_id: uid, note: np.note, created_at: new Date(now.getTime() - Math.random() * 5 * 86400000) })
+    notesCreated++
+  }
+
+  // Work sessions — past 14 days for devs (including 1 active)
+  const sessionPlan = [
+    // [user, daysAgo, startHour, durationMin]
+    ['Phineas', 0, 9, 145],   // today morning
+    ['Phineas', 1, 10, 220],
+    ['Phineas', 2, 14, 95],
+    ['Phineas', 3, 9, 180],
+    ['Phineas', 4, 13, 160],
+    ['Alex Chen', 0, 11, 75],
+    ['Alex Chen', 1, 9, 240],
+    ['Alex Chen', 2, 15, 110],
+    ['Alex Chen', 4, 10, 195],
+    ['Alex Chen', 6, 13, 130],
+    ['Jordan Rivers', 0, 14, 60],
+    ['Jordan Rivers', 1, 11, 180],
+    ['Jordan Rivers', 3, 9, 210],
+    ['Jordan Rivers', 5, 14, 120],
+    ['Sam Patel', 1, 10, 165],
+    ['Sam Patel', 2, 9, 200],
+    ['Sam Patel', 5, 13, 90],
+    ['Sam Patel', 7, 15, 175],
+    ['Maya Vega', 0, 8, 50],
+    ['Maya Vega', 2, 9, 75],
+    ['Theo Park', 1, 14, 90],
+    ['Vance', 1, 10, 130],
+    ['Vance', 3, 11, 170],
+  ]
+  let sessionsCreated = 0
+  // Use marker so we don't double-seed
+  const seedMarker = await db.collection('work_sessions').findOne({ seed_marker: true })
+  if (!seedMarker) {
+    for (const [name, ago, hour, dur] of sessionPlan) {
+      const uid = userIds[name]; if (!uid) continue
+      const start = daysAgo(ago); start.setHours(hour, 0, 0, 0)
+      const end = new Date(start.getTime() + dur * 60000)
+      await db.collection('work_sessions').insertOne({ id: uuidv4(), dev_id: uid, start_time: start, end_time: end, duration_minutes: dur, manual: false, manual_reason: null, created_at: start, seed_marker: true })
+      sessionsCreated++
+    }
+    // One active session — Phineas clocked in 45 min ago
+    const activeStart = new Date(Date.now() - 45 * 60000)
+    if (userIds['Phineas']) {
+      await db.collection('work_sessions').insertOne({ id: uuidv4(), dev_id: userIds['Phineas'], start_time: activeStart, end_time: null, duration_minutes: null, manual: false, manual_reason: null, created_at: activeStart, seed_marker: true })
+      sessionsCreated++
+    }
+  }
+
+  // Changelog entries
+  const changelogPlan = [
+    { title: 'Ban appeals shipped', description: 'Users can now appeal bans through a guided modal. Reviewers get notified instantly.', version_tag: 'v1.4.0', module_tags: ['Moderation'], age: 3 },
+    { title: 'XP boost shop item added', description: 'Spend your coins on a temporary XP multiplier. Three tiers available in the shop.', version_tag: 'v1.3.5', module_tags: ['Leveling', 'Economy'], age: 9 },
+    { title: 'Logging overhaul', description: 'Logs are now ~3x faster, support filtering by event type, and include image diffs on edits.', version_tag: 'v1.3.0', module_tags: ['Logging'], age: 21 },
+  ]
+  let changelogCreated = 0
+  for (const c of changelogPlan) {
+    const exists = await db.collection('changelog_entries').findOne({ title: c.title })
+    if (exists) continue
+    await db.collection('changelog_entries').insertOne({ id: uuidv4(), feature_id: null, title: c.title, description: c.description, version_tag: c.version_tag, module_tags: c.module_tags, created_at: daysAgo(c.age) })
+    changelogCreated++
+  }
+
+  return { ok: true, users_created: usersCreated, features_created: featuresCreated, upvotes_created: upvotesCreated, notes_created: notesCreated, sessions_created: sessionsCreated, changelog_created: changelogCreated, demo_password: 'demo123', demo_users: demoUsers.map(d => ({ display_name: d.display_name, role: d.role })) }
 }
 
 async function handleRoute(request, { params }) {
@@ -236,6 +419,21 @@ async function handleRoute(request, { params }) {
         await db.collection('feature_requests').insertOne({ ...f })
         return json({ feature: f })
       }
+      if (seg[1] && !seg[2] && method === 'GET') {
+        const f = await db.collection('feature_requests').findOne({ id: seg[1] })
+        if (!f) return json({ error: 'not found' }, 404)
+        const upvotes = await db.collection('feature_upvotes').find({ feature_id: f.id }).toArray()
+        const users = await db.collection('users').find({}).toArray()
+        const um = new Map(users.map(u => [u.id, { id: u.id, display_name: u.display_name, discord_id: u.discord_id, role: u.role }]))
+        const { _id, ...rest } = f
+        return json({ feature: { ...rest, upvote_count: upvotes.length, upvoted_by_me: upvotes.some(u => u.user_id === me.id), submitted_by_user: um.get(f.submitted_by) || null, claimed_by_user: f.claimed_by ? um.get(f.claimed_by) || null : null } })
+      }
+      if (seg[1] && seg[2] === 'upvoters' && method === 'GET') {
+        const upvotes = await db.collection('feature_upvotes').find({ feature_id: seg[1] }).sort({ created_at: 1 }).toArray()
+        const users = await db.collection('users').find({}).toArray()
+        const um = new Map(users.map(u => [u.id, u]))
+        return json({ upvoters: upvotes.map(uv => { const u = um.get(uv.user_id); return u ? { id: u.id, display_name: u.display_name, discord_id: u.discord_id, role: u.role, upvoted_at: uv.created_at } : null }).filter(Boolean) })
+      }
       if (seg[1] && !seg[2] && method === 'PATCH') {
         const body = await request.json()
         const f = await db.collection('feature_requests').findOne({ id: seg[1] })
@@ -292,6 +490,7 @@ async function handleRoute(request, { params }) {
 
     // ============== SESSIONS ==============
     if (seg[0] === 'sessions') {
+      await autoCleanupStaleSessions(db)
       if (seg[1] === 'toggle' && method === 'POST') {
         const active = await db.collection('work_sessions').findOne({ dev_id: me.id, end_time: null })
         if (active) {
@@ -363,6 +562,7 @@ async function handleRoute(request, { params }) {
 
     // ============== STATS ==============
     if (seg[0] === 'stats' && method === 'GET') {
+      await autoCleanupStaleSessions(db)
       const devId = q.dev_id || me.id
       const now = new Date()
       let from = null, to = null
@@ -446,6 +646,7 @@ async function handleRoute(request, { params }) {
     // ============== OVERVIEW ==============
     if (seg[0] === 'overview' && method === 'GET') {
       if (!isAdmin) return json({ error: 'forbidden' }, 403)
+      await autoCleanupStaleSessions(db)
       const now = new Date()
       const sow = new Date(); sow.setDate(now.getDate() - now.getDay()); sow.setHours(0,0,0,0)
       const som = new Date(now.getFullYear(), now.getMonth(), 1)
@@ -459,6 +660,13 @@ async function handleRoute(request, { params }) {
         out.push({ user: cleanUser(u), week_minutes: wmin, on_duty: !!active, on_duty_since: active?.start_time || null, month_shipped: mShipped })
       }
       return json({ overview: out })
+    }
+
+    // ============== ADMIN SEED (lead admin only, idempotent-ish) ==============
+    if (seg[0] === 'admin' && seg[1] === 'seed' && method === 'POST') {
+      if (me.role !== 'lead_admin') return json({ error: 'forbidden' }, 403)
+      const result = await seedDemoData(db, me)
+      return json(result)
     }
 
     return json({ error: `Route /${seg.join('/')} not found` }, 404)
