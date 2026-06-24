@@ -10,38 +10,44 @@ const LEAD_ADMIN_NAME = 'Vance'
 
 // ============== MONGO CONNECTION (serverless-safe) ==============
 // Cache the connection promise on globalThis so warm Lambda/Vercel containers
-// reuse a single MongoClient across invocations. Module-level `let` is NOT
-// reliable across serverless cold starts and hot-reload.
+// reuse a single MongoClient across all invocations.
 const MONGO_URL = process.env.MONGO_URL
-const DB_NAME = process.env.DB_NAME
+const DB_NAME = process.env.DB_NAME || 'bundle'
 
 if (!MONGO_URL) {
-  console.error('FATAL: MONGO_URL env var is not set')
+  console.error('[STARTUP] MONGO_URL env var is NOT set. Database calls will fail.')
 }
 
-let _indexesReady = globalThis._bundleIndexesReady || false
-
 async function getDb() {
-  if (!MONGO_URL) throw new Error('MONGO_URL is not configured')
+  if (!process.env.MONGO_URL) {
+    const err = new Error('MONGO_URL is not configured. Set it in Vercel → Project → Settings → Environment Variables.')
+    err.code = 'MONGO_URL_MISSING'
+    throw err
+  }
   if (!globalThis._bundleMongoClientPromise) {
-    const client = new MongoClient(MONGO_URL, {
+    console.log('[MONGO] Creating new MongoClient connection (cold start)')
+    const client = new MongoClient(process.env.MONGO_URL, {
       maxPoolSize: 10,
       minPoolSize: 0,
-      serverSelectionTimeoutMS: 5000,
+      serverSelectionTimeoutMS: 8000,
       socketTimeoutMS: 45000,
+      connectTimeoutMS: 10000,
     })
-    globalThis._bundleMongoClientPromise = client.connect().catch(err => {
-      // Reset so the next request can retry
-      globalThis._bundleMongoClientPromise = null
-      throw err
-    })
+    globalThis._bundleMongoClientPromise = client.connect()
+      .then(c => {
+        console.log('[MONGO] Connected successfully')
+        return c
+      })
+      .catch(err => {
+        console.error('[MONGO] Connection failed:', err?.message, err?.code)
+        globalThis._bundleMongoClientPromise = null  // allow retry on next request
+        throw err
+      })
   }
   const client = await globalThis._bundleMongoClientPromise
-  const db = client.db(DB_NAME)
-  if (!_indexesReady) {
-    _indexesReady = true
+  const db = client.db(process.env.DB_NAME || 'bundle')
+  if (!globalThis._bundleIndexesReady) {
     globalThis._bundleIndexesReady = true
-    // Fire-and-forget index creation — idempotent, runs once per warm container
     ;(async () => {
       try {
         await db.collection('users').createIndex({ discord_id: 1 }, { unique: true })
@@ -341,33 +347,68 @@ async function handleRoute(request, { params }) {
     // ============== AUTH ==============
     if (seg[0] === 'auth') {
       if (seg[1] === 'login' && method === 'POST') {
-        const { identifier, password } = await request.json()
-        if (!identifier || !password) return json({ error: 'Missing credentials' }, 400)
-        // Lead admin path
-        if (identifier === LEAD_ADMIN_NAME || identifier === LEAD_ADMIN_DISCORD_ID) {
-          if (password !== process.env.LEAD_ADMIN_PASSWORD) return json({ error: 'Invalid credentials' }, 401)
-          let user = await db.collection('users').findOne({ discord_id: LEAD_ADMIN_DISCORD_ID })
-          if (!user) {
-            user = { id: uuidv4(), discord_id: LEAD_ADMIN_DISCORD_ID, display_name: LEAD_ADMIN_NAME, password_hash: null, role: 'lead_admin', active: true, daily_goal: 4, weekly_goal: 25, created_at: new Date() }
-            await db.collection('users').insertOne({ ...user })
-          } else if (user.role !== 'lead_admin' || !user.active) {
-            await db.collection('users').updateOne({ id: user.id }, { $set: { role: 'lead_admin', active: true } })
-            user.role = 'lead_admin'; user.active = true
+        try {
+          const { identifier, password } = await request.json()
+          if (!identifier || !password) return json({ error: 'Missing credentials' }, 400)
+          // Lead admin path
+          if (identifier === LEAD_ADMIN_NAME || identifier === LEAD_ADMIN_DISCORD_ID) {
+            if (password !== process.env.LEAD_ADMIN_PASSWORD) {
+              console.log('[AUTH] Lead admin login: wrong password for identifier=', identifier)
+              return json({ error: 'Invalid credentials' }, 401)
+            }
+            if (!process.env.LEAD_ADMIN_PASSWORD) {
+              console.error('[AUTH] LEAD_ADMIN_PASSWORD env var is not set')
+              return json({ error: 'Server not configured: LEAD_ADMIN_PASSWORD missing' }, 500)
+            }
+            let user = await db.collection('users').findOne({ discord_id: LEAD_ADMIN_DISCORD_ID })
+            if (!user) {
+              user = { id: uuidv4(), discord_id: LEAD_ADMIN_DISCORD_ID, display_name: LEAD_ADMIN_NAME, password_hash: null, role: 'lead_admin', active: true, daily_goal: 4, weekly_goal: 25, created_at: new Date() }
+              await db.collection('users').insertOne({ ...user })
+              console.log('[AUTH] Lead admin auto-seeded:', user.id)
+            } else if (user.role !== 'lead_admin' || !user.active) {
+              await db.collection('users').updateOne({ id: user.id }, { $set: { role: 'lead_admin', active: true } })
+              user.role = 'lead_admin'; user.active = true
+            }
+            if (!process.env.JWT_SECRET) {
+              console.error('[AUTH] JWT_SECRET env var is not set')
+              return json({ error: 'Server not configured: JWT_SECRET missing' }, 500)
+            }
+            const token = signToken(user)
+            console.log('[AUTH] Lead admin login OK:', user.id)
+            return setCookie(json({ user: cleanUser(user) }), token)
           }
-          const token = signToken(user)
-          return setCookie(json({ user: cleanUser(user) }), token)
+          const dbUser = await db.collection('users').findOne({ $or: [{ display_name: identifier }, { discord_id: identifier }] })
+          if (!dbUser || !dbUser.active) {
+            console.log('[AUTH] Login: user not found or inactive, identifier=', identifier)
+            return json({ error: 'Invalid credentials' }, 401)
+          }
+          if (!dbUser.password_hash) {
+            console.log('[AUTH] Login: user has no password_hash:', dbUser.id)
+            return json({ error: 'Invalid credentials' }, 401)
+          }
+          const ok = await bcrypt.compare(password, dbUser.password_hash)
+          if (!ok) {
+            console.log('[AUTH] Login: bcrypt mismatch for', dbUser.id)
+            return json({ error: 'Invalid credentials' }, 401)
+          }
+          if (dbUser.role === 'developer') {
+            const lOk = await checkLanyard(dbUser.discord_id)
+            if (!lOk) {
+              console.log('[AUTH] Login: lanyard gate failed for', dbUser.id)
+              return json({ error: 'lanyard_required', message: 'You need to join the Lanyard Discord server to use this portal.', invite: 'https://discord.com/invite/lanyard' }, 403)
+            }
+          }
+          if (!process.env.JWT_SECRET) {
+            console.error('[AUTH] JWT_SECRET env var is not set')
+            return json({ error: 'Server not configured: JWT_SECRET missing' }, 500)
+          }
+          const token = signToken(dbUser)
+          console.log('[AUTH] Login OK:', dbUser.id, dbUser.role)
+          return setCookie(json({ user: cleanUser(dbUser) }), token)
+        } catch (e) {
+          console.error('[AUTH] Login error:', e?.message, '| code:', e?.code, '| stack:', e?.stack)
+          return json({ error: 'Login failed', detail: e?.message || 'unknown', code: e?.code || 'unknown' }, 500)
         }
-        const dbUser = await db.collection('users').findOne({ $or: [{ display_name: identifier }, { discord_id: identifier }] })
-        if (!dbUser || !dbUser.active) return json({ error: 'Invalid credentials' }, 401)
-        if (!dbUser.password_hash) return json({ error: 'Invalid credentials' }, 401)
-        const ok = await bcrypt.compare(password, dbUser.password_hash)
-        if (!ok) return json({ error: 'Invalid credentials' }, 401)
-        if (dbUser.role === 'developer') {
-          const lOk = await checkLanyard(dbUser.discord_id)
-          if (!lOk) return json({ error: 'lanyard_required', message: 'You need to join the Lanyard Discord server to use this portal.', invite: 'https://discord.com/invite/lanyard' }, 403)
-        }
-        const token = signToken(dbUser)
-        return setCookie(json({ user: cleanUser(dbUser) }), token)
       }
       if (seg[1] === 'logout' && method === 'POST') {
         return clearCookie(json({ ok: true }))
@@ -380,78 +421,87 @@ async function handleRoute(request, { params }) {
 
       // ===== DISCORD OAUTH START =====
       if (seg[1] === 'discord' && seg[2] === 'start' && method === 'GET') {
-        const clientId = process.env.DISCORD_CLIENT_ID
-        const clientSecret = process.env.DISCORD_CLIENT_SECRET
-        const origin = new URL(request.url).origin
-        const redirectUri = process.env.DISCORD_REDIRECT_URI || `${process.env.NEXT_PUBLIC_BASE_URL || origin}/api/auth/discord/callback`
+        try {
+          const clientId = process.env.DISCORD_CLIENT_ID
+          const clientSecret = process.env.DISCORD_CLIENT_SECRET
+          const origin = new URL(request.url).origin
+          const redirectUri = process.env.DISCORD_REDIRECT_URI || `${process.env.NEXT_PUBLIC_BASE_URL || origin}/api/auth/discord/callback`
 
-        const missing = []
-        if (!clientId) missing.push('DISCORD_CLIENT_ID')
-        if (!clientSecret) missing.push('DISCORD_CLIENT_SECRET')
-        if (missing.length > 0) {
-          const msg = `Discord OAuth env vars missing: ${missing.join(', ')}. Set them in Vercel → Project → Settings → Environment Variables.`
-          console.error(msg)
-          return NextResponse.redirect(`${process.env.NEXT_PUBLIC_BASE_URL || origin}/login?discord_error=not_configured&missing=${encodeURIComponent(missing.join(','))}`)
+          const missing = []
+          if (!clientId) missing.push('DISCORD_CLIENT_ID')
+          if (!clientSecret) missing.push('DISCORD_CLIENT_SECRET')
+          if (missing.length > 0) {
+            console.error('[DISCORD_OAUTH] /start missing env vars:', missing.join(', '))
+            return NextResponse.redirect(`${process.env.NEXT_PUBLIC_BASE_URL || origin}/login?discord_error=not_configured&missing=${encodeURIComponent(missing.join(','))}`)
+          }
+          console.log('[DISCORD_OAUTH] /start redirect_uri=', redirectUri)
+          const state = uuidv4()
+          const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify&state=${state}&prompt=none`
+          const res = NextResponse.redirect(oauthUrl)
+          res.cookies.set('discord_oauth_state', state, { httpOnly: true, sameSite: 'lax', path: '/', maxAge: 600, secure: true })
+          return res
+        } catch (e) {
+          console.error('[DISCORD_OAUTH] /start error:', e?.message, '| stack:', e?.stack)
+          const origin = (() => { try { return new URL(request.url).origin } catch { return '' } })()
+          return NextResponse.redirect(`${process.env.NEXT_PUBLIC_BASE_URL || origin}/login?discord_error=unexpected`)
         }
-        const state = uuidv4()
-        const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify&state=${state}&prompt=none`
-        const res = NextResponse.redirect(oauthUrl)
-        res.cookies.set('discord_oauth_state', state, { httpOnly: true, sameSite: 'lax', path: '/', maxAge: 600, secure: true })
-        return res
       }
 
       // ===== DISCORD OAUTH CALLBACK =====
       if (seg[1] === 'discord' && seg[2] === 'callback' && method === 'GET') {
-        const code = q.code
-        const state = q.state
-        const origin = new URL(request.url).origin
+        const origin = (() => { try { return new URL(request.url).origin } catch { return '' } })()
         const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || origin
-        const clientId = process.env.DISCORD_CLIENT_ID
-        const clientSecret = process.env.DISCORD_CLIENT_SECRET
-        const redirectUri = process.env.DISCORD_REDIRECT_URI || `${baseUrl}/api/auth/discord/callback`
-
-        if (!clientId || !clientSecret) {
-          console.error('Discord OAuth callback: env vars missing (DISCORD_CLIENT_ID/SECRET). Set them in Vercel.')
-          return NextResponse.redirect(`${baseUrl}/login?discord_error=not_configured`)
-        }
-
-        const cookieState = (request.headers.get('cookie') || '').match(/discord_oauth_state=([^;]+)/)?.[1]
-        if (!code || !state || state !== cookieState) {
-          return NextResponse.redirect(`${baseUrl}/login?discord_error=bad_state`)
-        }
         try {
+          const code = q.code
+          const state = q.state
+          const clientId = process.env.DISCORD_CLIENT_ID
+          const clientSecret = process.env.DISCORD_CLIENT_SECRET
+          const redirectUri = process.env.DISCORD_REDIRECT_URI || `${baseUrl}/api/auth/discord/callback`
+
+          if (!clientId || !clientSecret) {
+            console.error('[DISCORD_OAUTH] /callback missing env vars: clientId?', !!clientId, 'clientSecret?', !!clientSecret)
+            return NextResponse.redirect(`${baseUrl}/login?discord_error=not_configured`)
+          }
+
+          const cookieState = (request.headers.get('cookie') || '').match(/discord_oauth_state=([^;]+)/)?.[1]
+          if (!code || !state || state !== cookieState) {
+            console.warn('[DISCORD_OAUTH] /callback bad state: hasCode=', !!code, 'hasState=', !!state, 'matchesCookie=', state === cookieState)
+            return NextResponse.redirect(`${baseUrl}/login?discord_error=bad_state`)
+          }
           const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({
-              client_id: clientId,
-              client_secret: clientSecret,
-              grant_type: 'authorization_code',
-              code,
-              redirect_uri: redirectUri,
-            }),
+            body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, grant_type: 'authorization_code', code, redirect_uri: redirectUri }),
           })
           if (!tokenRes.ok) {
             const body = await tokenRes.text().catch(() => '')
-            console.error('Discord token exchange failed:', tokenRes.status, body)
+            console.error('[DISCORD_OAUTH] token exchange failed:', tokenRes.status, body)
             return NextResponse.redirect(`${baseUrl}/login?discord_error=token_exchange`)
           }
           const tokenData = await tokenRes.json()
-          const meRes = await fetch('https://discord.com/api/users/@me', {
-            headers: { Authorization: `Bearer ${tokenData.access_token}` },
-          })
-          if (!meRes.ok) return NextResponse.redirect(`${baseUrl}/login?discord_error=fetch_user`)
+          const meRes = await fetch('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${tokenData.access_token}` } })
+          if (!meRes.ok) {
+            const body = await meRes.text().catch(() => '')
+            console.error('[DISCORD_OAUTH] /users/@me failed:', meRes.status, body)
+            return NextResponse.redirect(`${baseUrl}/login?discord_error=fetch_user`)
+          }
           const discordUser = await meRes.json()
+          console.log('[DISCORD_OAUTH] Discord user resolved:', discordUser.id, discordUser.username)
           const dbUser = await db.collection('users').findOne({ discord_id: discordUser.id })
           if (!dbUser) {
+            console.log('[DISCORD_OAUTH] No account for discord_id=', discordUser.id)
             return NextResponse.redirect(`${baseUrl}/login?discord_error=no_account&discord_username=${encodeURIComponent(discordUser.username)}`)
           }
           if (!dbUser.active) {
+            console.log('[DISCORD_OAUTH] Account deactivated:', dbUser.id)
             return NextResponse.redirect(`${baseUrl}/login?discord_error=deactivated`)
           }
           if (dbUser.role === 'developer') {
             const lOk = await checkLanyard(dbUser.discord_id)
-            if (!lOk) return NextResponse.redirect(`${baseUrl}/login?discord_error=lanyard`)
+            if (!lOk) {
+              console.log('[DISCORD_OAUTH] Lanyard gate failed for dev:', dbUser.id)
+              return NextResponse.redirect(`${baseUrl}/login?discord_error=lanyard`)
+            }
           }
           await db.collection('users').updateOne({ id: dbUser.id }, { $set: {
             discord_access_token: tokenData.access_token,
@@ -460,14 +510,19 @@ async function handleRoute(request, { params }) {
             discord_username: discordUser.username,
             discord_avatar: discordUser.avatar,
           } })
+          if (!process.env.JWT_SECRET) {
+            console.error('[DISCORD_OAUTH] JWT_SECRET env var is not set')
+            return NextResponse.redirect(`${baseUrl}/login?discord_error=not_configured&missing=JWT_SECRET`)
+          }
           const token = signToken(dbUser)
+          console.log('[DISCORD_OAUTH] Login OK:', dbUser.id, dbUser.role)
           const res = NextResponse.redirect(`${baseUrl}/dashboard`)
           res.cookies.set(COOKIE_NAME, token, { httpOnly: true, sameSite: 'lax', path: '/', maxAge: 60 * 60 * 24 * 30, secure: true })
           res.cookies.set('discord_oauth_state', '', { httpOnly: true, path: '/', maxAge: 0 })
           return res
         } catch (e) {
-          console.error('Discord OAuth callback error:', e?.message, e?.stack)
-          return NextResponse.redirect(`${baseUrl}/login?discord_error=unexpected`)
+          console.error('[DISCORD_OAUTH] /callback unexpected error:', e?.message, '| code:', e?.code, '| stack:', e?.stack)
+          return NextResponse.redirect(`${baseUrl}/login?discord_error=unexpected&detail=${encodeURIComponent(e?.message || 'unknown')}`)
         }
       }
     }
