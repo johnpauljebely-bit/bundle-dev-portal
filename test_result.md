@@ -276,7 +276,62 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: |
-      ### Iteration 4 — Weekly recap + Archive view + @mention support + Random sign-out bug fix
+      ### Iteration 5 — Perf + Demo data removal + Discord OAuth + upbot.app polish
+
+      **1. Performance (#1 done):**
+      - 16 MongoDB indexes added on hot fields: discord_id (unique), display_name,
+        active, status, claimed_by, submitted_by, created_at, pinned+created_at,
+        feature_id+user_id (unique), feature_id, user_id, feature_id+created_at,
+        dev_id+start_time, dev_id+end_time, start_time, changelog created_at
+      - New /components/Skeletons.js with FeatureGridSkeleton, DashboardSkeleton,
+        DevGridSkeleton, LeaderboardSkeleton, ChangelogSkeleton, StatCardSkeleton
+      - Dashboard now renders DashboardSkeleton during load instead of null
+      - Features page uses keepPreviousData + skeleton fallback
+      - Leaderboard, Changelog, devs list all moved to aggressive caching
+        (refreshInterval: 0, dedupingInterval: 2-5 min, no focus revalidation)
+      - Lanyard avatar fetches: dedup 5min, refresh 0, shouldRetryOnError: false
+        — was firing 7+ calls per page render, now 1 per unique discord_id
+      - /api/users supports `?lite=1` projection (id/discord_id/display_name/role/active only)
+      - MentionTextarea + AppShell now use lite endpoint
+      - API uses MongoDB .project() to drop password_hash and _id at DB level
+
+      **2. Demo data removed (#2 done):**
+      - All seeded users (Maya Vega, Theo Park, Phineas, Alex Chen, Jordan Rivers,
+        Sam Patel), 10 features, 24 upvotes, 5 notes, 24 sessions, 3 changelog
+        entries deleted from DB (verified: 1 user remaining = Vance)
+      - `POST /api/admin/seed` endpoint removed
+      - Entire `seedDemoData()` function (310 lines) removed from route.js
+
+      **3. Discord OAuth (#3 done):**
+      - New endpoints:
+        GET  /api/auth/discord/start    — sets state cookie, 307 redirects to Discord
+        GET  /api/auth/discord/callback — validates state, exchanges code, fetches
+                                          /users/@me, looks up by discord_id, runs
+                                          Lanyard gate for devs, sets bundle_auth
+                                          cookie, redirects to /dashboard
+      - Error redirects to /login?discord_error= with codes: no_account (shows
+        "No account found for {username}. Contact an admin..."), lanyard (shows
+        Lanyard join CTA), deactivated, bad_state, token_exchange, fetch_user,
+        unexpected
+      - Discord access_token / refresh_token / expires_at / username / avatar
+        stored on user record (not used for anything yet, per requirement)
+      - Lead admin + admin roles bypass Lanyard gate, devs gated as before
+      - Env vars added: DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_REDIRECT_URI
+      - Verified via curl: /start returns 307 with proper OAuth URL + state cookie;
+        bad-state /callback redirects to /login?discord_error=bad_state
+
+      **4. upbot.app UI polish:**
+      - Login page completely redesigned: large gradient headline ("Welcome to
+        **Bundle**"), Bundle logo with glow halo, prominent Sign in with Discord
+        button in #5865F2 with soft shadow + Discord logo SVG, "OR WITH PASSWORD"
+        divider, uppercase-tracked labels, taller inputs, backdrop-blur card with
+        radial blurple background glow
+      - Sidebar refined: vertical primary-color accent bar on active item, icons
+        pick up primary color when active, subtle gradient glow at top, logo halo,
+        sidebar items have hover translate-x for tactile feel
+      - Skeletons match the design language (proper card sizing/spacing)
+
+      All four iterations complete. No regressions.
 
       **Bug fix — random sign-outs:**
       Root cause was in `components/AppShell.js`: the `useMe` SWR fetcher threw on

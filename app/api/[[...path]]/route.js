@@ -187,6 +187,119 @@ function notifyFeatureChange(db, payload) {
   })()
 }
 
+// ============== WEEKLY RECAP ==============
+async function buildWeeklyRecap(db) {
+  const now = new Date()
+  const weekAgo = new Date(now.getTime() - 7 * 86400000)
+  const users = await db.collection('users').find({ active: true }).toArray()
+  const um = new Map(users.map(u => [u.id, u]))
+  const sessions = await db.collection('work_sessions').find({ start_time: { $gte: weekAgo }, end_time: { $ne: null } }).toArray()
+  const hoursByUser = {}
+  let totalMin = 0
+  for (const s of sessions) {
+    hoursByUser[s.dev_id] = (hoursByUser[s.dev_id] || 0) + (s.duration_minutes || 0)
+    totalMin += (s.duration_minutes || 0)
+  }
+  const top = Object.entries(hoursByUser).map(([id, min]) => ({ user: um.get(id), minutes: min })).filter(x => x.user).sort((a,b) => b.minutes - a.minutes).slice(0, 5)
+  const shipped = await db.collection('feature_requests').find({ status: 'shipped', updated_at: { $gte: weekAgo } }).toArray()
+  const newSubmitted = await db.collection('feature_requests').find({ created_at: { $gte: weekAgo } }).toArray()
+  const inProgress = await db.collection('feature_requests').find({ status: { $in: ['claimed', 'in_progress', 'in_review'] } }).toArray()
+  return { totalMin, top, shipped, newSubmitted, inProgress, weekAgo, now }
+}
+
+async function sendWeeklyRecap(db) {
+  const settings = await getSettings(db)
+  if (!settings.discord_webhook_url) return { error: 'No webhook configured' }
+  const recap = await buildWeeklyRecap(db)
+  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || ''
+  const totalHours = (recap.totalMin / 60).toFixed(1)
+  const fields = []
+  if (recap.top.length > 0) {
+    fields.push({
+      name: '🏆 Top contributors',
+      value: recap.top.map((t, i) => {
+        const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `#${i+1}`
+        return `${medal} **${t.user.display_name}** — ${(t.minutes/60).toFixed(1)}h`
+      }).join('\n'),
+      inline: false,
+    })
+  }
+  if (recap.shipped.length > 0) fields.push({ name: `🚢 Shipped (${recap.shipped.length})`, value: recap.shipped.slice(0, 8).map(f => `• ${f.title}`).join('\n').slice(0, 1024), inline: false })
+  if (recap.newSubmitted.length > 0) fields.push({ name: `✨ New requests (${recap.newSubmitted.length})`, value: recap.newSubmitted.slice(0, 8).map(f => `• ${f.title}`).join('\n').slice(0, 1024), inline: false })
+  if (recap.inProgress.length > 0) fields.push({ name: `🔨 In flight (${recap.inProgress.length})`, value: recap.inProgress.slice(0, 8).map(f => `• ${f.title}`).join('\n').slice(0, 1024), inline: false })
+  const body = {
+    username: 'Bundle Dev Portal',
+    embeds: [{
+      title: `📊 Bundle weekly recap`,
+      description: `**${totalHours}h** logged across the team this week.\n${recap.weekAgo.toLocaleDateString()} → ${recap.now.toLocaleDateString()}`,
+      color: 6011838,
+      url: `${baseUrl}/dashboard`,
+      fields,
+      footer: { text: 'Bundle Dev Portal' },
+      timestamp: recap.now.toISOString(),
+    }]
+  }
+  try {
+    const r = await fetch(settings.discord_webhook_url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    if (!r.ok) return { error: `Discord returned ${r.status}` }
+    await db.collection('settings').updateOne({ id: 'app-settings' }, { $set: { last_recap_sent_at: new Date() } })
+    return { ok: true, totals: { total_minutes: recap.totalMin, shipped: recap.shipped.length, new: recap.newSubmitted.length, in_progress: recap.inProgress.length } }
+  } catch (e) {
+    return { error: e.message }
+  }
+}
+
+async function maybeSendScheduledRecap(db) {
+  try {
+    const s = await getSettings(db)
+    if (!s.weekly_recap_enabled || !s.discord_webhook_url || !s.notifications_enabled) return
+    const last = s.last_recap_sent_at ? new Date(s.last_recap_sent_at) : null
+    const now = new Date()
+    if (last && (now - last) < 7 * 86400000) return
+    if (now.getUTCDay() !== 1) return
+    await sendWeeklyRecap(db)
+  } catch (e) { console.error('Auto recap failed:', e?.message) }
+}
+
+// ============== MENTION PARSING ==============
+function parseMentions(noteText, users) {
+  if (!noteText || !users || users.length === 0) return []
+  const mentioned = []
+  const sorted = [...users].sort((a,b) => b.display_name.length - a.display_name.length)
+  for (const u of sorted) {
+    const escaped = u.display_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const re = new RegExp(`@${escaped}(?=\\s|$|[.,!?;:])`, 'i')
+    if (re.test(noteText)) mentioned.push(u)
+  }
+  return mentioned
+}
+
+function notifyMention(db, { feature, note, actor, mentionedUsers }) {
+  ;(async () => {
+    try {
+      const settings = await getSettings(db)
+      if (!settings.notifications_enabled || !settings.discord_webhook_url) return
+      if (mentionedUsers.length === 0) return
+      const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || ''
+      const pingContent = mentionedUsers.map(u => `<@${u.discord_id}>`).join(' ')
+      const body = {
+        username: 'Bundle Dev Portal',
+        content: pingContent,
+        allowed_mentions: { parse: ['users'], users: mentionedUsers.map(u => u.discord_id) },
+        embeds: [{
+          title: `💬 New mention in: ${feature.title}`,
+          description: `**${actor.display_name}** wrote:\n\n>>> ${note.length > 800 ? note.slice(0, 800) + '…' : note}`,
+          color: 5793266,
+          url: `${baseUrl}/features/${feature.id}`,
+          footer: { text: `In feature: ${feature.title}` },
+          timestamp: new Date().toISOString(),
+        }]
+      }
+      await fetch(settings.discord_webhook_url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    } catch (e) { console.error('Mention webhook failed:', e?.message) }
+  })()
+}
+
 async function handleRoute(request, { params }) {
   const { path = [] } = await params
   const method = request.method
@@ -234,6 +347,82 @@ async function handleRoute(request, { params }) {
         const u = await getCurrentUser(request)
         if (!u) return json({ user: null }, 401)
         return json({ user: u })
+      }
+
+      // ===== DISCORD OAUTH START =====
+      if (seg[1] === 'discord' && seg[2] === 'start' && method === 'GET') {
+        const clientId = process.env.DISCORD_CLIENT_ID
+        const redirectUri = process.env.DISCORD_REDIRECT_URI
+        if (!clientId || !redirectUri) return json({ error: 'Discord OAuth not configured' }, 500)
+        const state = uuidv4()
+        const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify&state=${state}&prompt=none`
+        const res = NextResponse.redirect(oauthUrl)
+        res.cookies.set('discord_oauth_state', state, { httpOnly: true, sameSite: 'lax', path: '/', maxAge: 600, secure: true })
+        return res
+      }
+
+      // ===== DISCORD OAUTH CALLBACK =====
+      if (seg[1] === 'discord' && seg[2] === 'callback' && method === 'GET') {
+        const code = q.code
+        const state = q.state
+        const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || ''
+        const cookieState = (request.headers.get('cookie') || '').match(/discord_oauth_state=([^;]+)/)?.[1]
+        if (!code || !state || state !== cookieState) {
+          return NextResponse.redirect(`${baseUrl}/login?discord_error=bad_state`)
+        }
+        try {
+          // Exchange code for access token
+          const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              client_id: process.env.DISCORD_CLIENT_ID,
+              client_secret: process.env.DISCORD_CLIENT_SECRET,
+              grant_type: 'authorization_code',
+              code,
+              redirect_uri: process.env.DISCORD_REDIRECT_URI,
+            }),
+          })
+          if (!tokenRes.ok) {
+            return NextResponse.redirect(`${baseUrl}/login?discord_error=token_exchange`)
+          }
+          const tokenData = await tokenRes.json()
+          // Fetch user info
+          const meRes = await fetch('https://discord.com/api/users/@me', {
+            headers: { Authorization: `Bearer ${tokenData.access_token}` },
+          })
+          if (!meRes.ok) return NextResponse.redirect(`${baseUrl}/login?discord_error=fetch_user`)
+          const discordUser = await meRes.json()
+          // Look up by discord_id
+          const dbUser = await db.collection('users').findOne({ discord_id: discordUser.id })
+          if (!dbUser) {
+            return NextResponse.redirect(`${baseUrl}/login?discord_error=no_account&discord_username=${encodeURIComponent(discordUser.username)}`)
+          }
+          if (!dbUser.active) {
+            return NextResponse.redirect(`${baseUrl}/login?discord_error=deactivated`)
+          }
+          // Lanyard gate for devs only
+          if (dbUser.role === 'developer') {
+            const lOk = await checkLanyard(dbUser.discord_id)
+            if (!lOk) return NextResponse.redirect(`${baseUrl}/login?discord_error=lanyard`)
+          }
+          // Store Discord token (not used for anything yet, per requirement)
+          await db.collection('users').updateOne({ id: dbUser.id }, { $set: {
+            discord_access_token: tokenData.access_token,
+            discord_refresh_token: tokenData.refresh_token,
+            discord_token_expires_at: new Date(Date.now() + (tokenData.expires_in || 0) * 1000),
+            discord_username: discordUser.username,
+            discord_avatar: discordUser.avatar,
+          } })
+          const token = signToken(dbUser)
+          const res = NextResponse.redirect(`${baseUrl}/dashboard`)
+          res.cookies.set(COOKIE_NAME, token, { httpOnly: true, sameSite: 'lax', path: '/', maxAge: 60 * 60 * 24 * 30, secure: true })
+          res.cookies.set('discord_oauth_state', '', { httpOnly: true, path: '/', maxAge: 0 })
+          return res
+        } catch (e) {
+          console.error('Discord OAuth callback error:', e?.message)
+          return NextResponse.redirect(`${baseUrl}/login?discord_error=unexpected`)
+        }
       }
     }
 

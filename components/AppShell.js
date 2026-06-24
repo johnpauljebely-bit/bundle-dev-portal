@@ -83,21 +83,26 @@ export function AppShell({ children, requireAdmin = false }) {
 
   return (
     <div className="min-h-screen flex bg-background">
-      <aside className="hidden md:flex w-64 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
-        <div className="px-5 py-5 flex items-center gap-2.5 border-b border-sidebar-border">
-          <BundleLogo className="h-8 w-8" />
+      <aside className="hidden md:flex w-64 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground relative">
+        <div className="absolute top-0 left-0 right-0 h-32 bg-gradient-to-b from-primary/10 to-transparent pointer-events-none" />
+        <div className="px-5 py-5 flex items-center gap-2.5 border-b border-sidebar-border relative">
+          <div className="relative">
+            <BundleLogo className="h-9 w-9" />
+            <div className="absolute inset-0 bg-primary/30 blur-xl rounded-full -z-10" />
+          </div>
           <div>
-            <div className="font-bold text-base text-foreground leading-none">Bundle</div>
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground mt-0.5">Dev Portal</div>
+            <div className="font-bold text-base text-foreground leading-none tracking-tight">Bundle</div>
+            <div className="text-[10px] uppercase tracking-[0.15em] text-muted-foreground mt-1">Dev Portal</div>
           </div>
         </div>
-        <nav className="flex-1 px-3 py-4 space-y-1">
+        <nav className="flex-1 px-3 py-4 space-y-0.5 relative">
           {navItems.map(item => {
             const active = pathname === item.href || (item.href !== '/dashboard' && pathname?.startsWith(item.href))
             const Icon = item.icon
             return (
-              <Link key={item.href} href={item.href} className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${active ? 'bg-sidebar-accent text-foreground font-medium' : 'hover:bg-sidebar-accent/60'}`}>
-                <Icon className="h-4 w-4" />
+              <Link key={item.href} href={item.href} className={`relative flex items-center gap-3 px-3 py-2.5 rounded-md text-sm transition-all ${active ? 'bg-sidebar-accent text-foreground font-medium shadow-sm' : 'hover:bg-sidebar-accent/60 hover:translate-x-0.5'}`}>
+                {active && <span className="absolute left-0 top-1/2 -translate-y-1/2 h-5 w-0.5 bg-primary rounded-full" />}
+                <Icon className={`h-4 w-4 ${active ? 'text-primary' : ''}`} />
                 {item.label}
               </Link>
             )
