@@ -17,7 +17,7 @@ export default function LeaderboardPage() { return <AppShell><Content /></AppShe
 function Content() {
   const [metric, setMetric] = useState('hours')
   const [range, setRange] = useState('month')
-  const { data } = useSWR(`/api/leaderboard?metric=${metric}&range=${range}`, fetcher, { refreshInterval: 30000 })
+  const { data, isLoading } = useSWR(`/api/leaderboard?metric=${metric}&range=${range}`, fetcher, { refreshInterval: 0, dedupingInterval: 120000, revalidateOnFocus: false, keepPreviousData: true })
   const board = data?.leaderboard || []
   return (
     <div className="px-6 py-6 max-w-4xl mx-auto space-y-5">

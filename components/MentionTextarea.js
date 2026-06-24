@@ -10,7 +10,7 @@ export function MentionTextarea({ value, onChange, placeholder, rows = 2, onKeyD
   const [query, setQuery] = useState(null) // null when not mentioning; string when actively typing after '@'
   const [position, setPosition] = useState(0)
   const [activeIdx, setActiveIdx] = useState(0)
-  const { data } = useSWR('/api/users', fetcher)
+  const { data } = useSWR('/api/users?lite=1', fetcher, { dedupingInterval: 60000 })
   const users = (data?.users || []).filter(u => u.active)
 
   function handleChange(e) {

@@ -10,7 +10,7 @@ const fetcher = (u) => fetch(u).then(r => r.json())
 
 export default function ChangelogPage() {
   const { data: meData } = useSWR('/api/auth/me', fetcher, { revalidateOnFocus: false })
-  const { data } = useSWR('/api/changelog', fetcher)
+  const { data, isLoading } = useSWR('/api/changelog', fetcher, { refreshInterval: 0, dedupingInterval: 300000, revalidateOnFocus: false })
   const entries = data?.entries || []
   const isAuthed = !!meData?.user
   return (

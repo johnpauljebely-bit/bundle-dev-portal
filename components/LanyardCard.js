@@ -5,7 +5,12 @@ import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Music2, Gamepad2, Code2 } from 'lucide-react'
 
-const fetcher = (u) => fetch(u).then(r => r.json())
+const lanyardFetcher = async (u) => {
+  const r = await fetch(u)
+  // 404 means not in Lanyard server — cache as such, don't retry
+  const data = await r.json().catch(() => ({ success: false }))
+  return { ...data, _status: r.status }
+}
 
 const statusColor = {
   online: 'bg-emerald-500',
@@ -18,19 +23,19 @@ const statusLabel = {
 }
 
 export function LanyardAvatar({ discord_id, fallback, className = 'h-10 w-10' }) {
-  const { data } = useSWR(discord_id ? `/api/lanyard/${discord_id}` : null, fetcher, { refreshInterval: 30000 })
+  const { data } = useSWR(discord_id ? `/api/lanyard/${discord_id}` : null, lanyardFetcher, { refreshInterval: 0, dedupingInterval: 300000, revalidateOnFocus: false, shouldRetryOnError: false })
   const u = data?.data?.discord_user
   const url = u?.avatar ? `https://cdn.discordapp.com/avatars/${u.id}/${u.avatar}.png?size=128` : null
   return (
     <Avatar className={className}>
       {url && <AvatarImage src={url} />}
-      <AvatarFallback className="bg-secondary text-foreground">{(fallback || u?.username || '?').slice(0,2).toUpperCase()}</AvatarFallback>
+      <AvatarFallback className="bg-secondary text-foreground text-xs">{(fallback || u?.username || '?').slice(0,2).toUpperCase()}</AvatarFallback>
     </Avatar>
   )
 }
 
 export function LanyardCard({ discord_id, displayName }) {
-  const { data } = useSWR(discord_id ? `/api/lanyard/${discord_id}` : null, fetcher, { refreshInterval: 20000 })
+  const { data } = useSWR(discord_id ? `/api/lanyard/${discord_id}` : null, lanyardFetcher, { refreshInterval: 30000, dedupingInterval: 15000, revalidateOnFocus: false, shouldRetryOnError: false })
   if (!data || !data.success) {
     return (
       <Card className="p-5">

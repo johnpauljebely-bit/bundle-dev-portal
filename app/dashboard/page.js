@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import useSWR from 'swr'
 import { AppShell, useMe } from '@/components/AppShell'
 import { LanyardAvatar } from '@/components/LanyardCard'
+import { DashboardSkeleton } from '@/components/Skeletons'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -55,7 +56,7 @@ function DashContent() {
     refreshActive(); refreshStats()
   }
 
-  if (!me) return null
+  if (!me) return <DashboardSkeleton />
 
   const dailyGoalMin = (me.daily_goal || 4) * 60
   const weeklyGoalMin = (me.weekly_goal || 25) * 60
