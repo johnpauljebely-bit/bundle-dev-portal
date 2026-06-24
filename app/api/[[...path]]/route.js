@@ -100,6 +100,93 @@ async function checkLanyard(discord_id) {
   } catch { return true }
 }
 
+// ============== DISCORD WEBHOOK ==============
+async function getSettings(db) {
+  let s = await db.collection('settings').findOne({ id: 'app-settings' })
+  if (!s) {
+    s = { id: 'app-settings', discord_webhook_url: '', notifications_enabled: true }
+    await db.collection('settings').insertOne({ ...s })
+  }
+  const { _id, ...rest } = s
+  return rest
+}
+
+const STATUS_META = {
+  pending:     { emoji: '📋', color: 9807270,  label: 'Pending' },
+  claimed:     { emoji: '🙌', color: 5793266,  label: 'Claimed' },
+  in_progress: { emoji: '🔨', color: 16312092, label: 'In Progress' },
+  in_review:   { emoji: '👀', color: 10181046, label: 'In Review' },
+  shipped:     { emoji: '🚢', color: 5763719,  label: 'Shipped' },
+  rejected:    { emoji: '🚫', color: 15548997, label: 'Rejected' },
+}
+const PRIORITY_LABELS = { low: 'Low', medium: 'Medium', high: 'High', critical: '🔥 Critical' }
+
+function notifyFeatureChange(db, payload) {
+  // Fire-and-forget — never block the request
+  ;(async () => {
+    try {
+      const settings = await getSettings(db)
+      if (!settings.notifications_enabled || !settings.discord_webhook_url) return
+      const { feature, oldFeature, actor, type } = payload
+      const meta = STATUS_META[feature.status] || STATUS_META.pending
+      const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || ''
+      const url = `${baseUrl}/features/${feature.id}`
+      const users = await db.collection('users').find({}).toArray()
+      const um = new Map(users.map(u => [u.id, u]))
+      const submitter = um.get(feature.submitted_by)
+      const claimer = feature.claimed_by ? um.get(feature.claimed_by) : null
+
+      let title, description
+      if (type === 'status_change') {
+        const oldMeta = STATUS_META[oldFeature.status] || STATUS_META.pending
+        title = `${meta.emoji} ${feature.title}`
+        description = `**Status:** ${oldMeta.label} → **${meta.label}**`
+      } else if (type === 'claimed') {
+        title = `🙌 Claimed: ${feature.title}`
+        description = `**${claimer?.display_name || 'Someone'}** claimed this feature`
+      } else if (type === 'unclaimed') {
+        title = `↩️ Unclaimed: ${feature.title}`
+        description = `Back in the pool — anyone can pick it up`
+      } else if (type === 'created') {
+        title = `✨ New feature request: ${feature.title}`
+        description = feature.description.length > 200 ? feature.description.slice(0, 200) + '…' : feature.description
+      } else if (type === 'pinned') {
+        title = `📌 Pinned: ${feature.title}`
+        description = `Featured at the top of the feature wall`
+      } else {
+        return
+      }
+
+      const fields = [
+        { name: 'Module', value: feature.module, inline: true },
+        { name: 'Priority', value: PRIORITY_LABELS[feature.priority] || feature.priority, inline: true },
+      ]
+      if (claimer) fields.push({ name: 'Claimed by', value: claimer.display_name, inline: true })
+
+      const body = {
+        username: 'Bundle Dev Portal',
+        embeds: [{
+          title: title.slice(0, 256),
+          description: description.slice(0, 2048),
+          color: meta.color,
+          url,
+          fields,
+          author: submitter ? { name: `Submitted by ${submitter.display_name}` } : undefined,
+          footer: { text: actor ? `Action by ${actor.display_name}` : 'Bundle' },
+          timestamp: new Date().toISOString(),
+        }]
+      }
+      await fetch(settings.discord_webhook_url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    } catch (e) {
+      console.error('Discord webhook failed:', e?.message)
+    }
+  })()
+}
+
 // ============== DEMO DATA SEED ==============
 async function seedDemoData(db, me) {
   // Demo users — passwords all "demo123"
@@ -417,6 +504,7 @@ async function handleRoute(request, { params }) {
         if (!title || !description || !mod) return json({ error: 'missing fields' }, 400)
         const f = { id: uuidv4(), title, description, module: mod, priority: 'medium', status: 'pending', submitted_by: me.id, claimed_by: null, pinned: false, created_at: new Date(), updated_at: new Date() }
         await db.collection('feature_requests').insertOne({ ...f })
+        notifyFeatureChange(db, { feature: f, actor: me, type: 'created' })
         return json({ feature: f })
       }
       if (seg[1] && !seg[2] && method === 'GET') {
@@ -455,6 +543,16 @@ async function handleRoute(request, { params }) {
         if (body.priority) { if (!isAdmin) return json({ error: 'forbidden' }, 403); update.priority = body.priority }
         if (typeof body.pinned === 'boolean') { if (!isAdmin) return json({ error: 'forbidden' }, 403); update.pinned = body.pinned }
         await db.collection('feature_requests').updateOne({ id: seg[1] }, { $set: update })
+        // Build updated feature for notification
+        const updatedFeature = { ...f, ...update }
+        const events = []
+        if (update.claimed_by && update.claimed_by !== f.claimed_by) events.push('claimed')
+        if (update.claimed_by === null && f.claimed_by !== null) events.push('unclaimed')
+        if (update.status && update.status !== f.status) events.push('status_change')
+        if (typeof body.pinned === 'boolean' && body.pinned && !f.pinned) events.push('pinned')
+        for (const ev of events) {
+          notifyFeatureChange(db, { feature: updatedFeature, oldFeature: f, actor: me, type: ev })
+        }
         return json({ ok: true })
       }
       if (seg[1] && !seg[2] && method === 'DELETE') {
@@ -660,6 +758,47 @@ async function handleRoute(request, { params }) {
         out.push({ user: cleanUser(u), week_minutes: wmin, on_duty: !!active, on_duty_since: active?.start_time || null, month_shipped: mShipped })
       }
       return json({ overview: out })
+    }
+
+    // ============== SETTINGS (admin) ==============
+    if (seg[0] === 'settings') {
+      if (!isAdmin) return json({ error: 'forbidden' }, 403)
+      if (!seg[1] && method === 'GET') {
+        const s = await getSettings(db)
+        return json({ settings: s })
+      }
+      if (!seg[1] && method === 'PATCH') {
+        const body = await request.json()
+        const update = {}
+        if (typeof body.discord_webhook_url === 'string') update.discord_webhook_url = body.discord_webhook_url
+        if (typeof body.notifications_enabled === 'boolean') update.notifications_enabled = body.notifications_enabled
+        await db.collection('settings').updateOne({ id: 'app-settings' }, { $set: update }, { upsert: true })
+        const s = await getSettings(db)
+        return json({ settings: s })
+      }
+      if (seg[1] === 'test-webhook' && method === 'POST') {
+        const s = await getSettings(db)
+        if (!s.discord_webhook_url) return json({ error: 'No webhook configured' }, 400)
+        try {
+          const r = await fetch(s.discord_webhook_url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              username: 'Bundle Dev Portal',
+              embeds: [{
+                title: '✅ Webhook test successful',
+                description: `Hello from **${me.display_name}**! This webhook is wired up correctly.`,
+                color: 5793266,
+                timestamp: new Date().toISOString(),
+              }]
+            })
+          })
+          if (!r.ok) return json({ error: `Discord returned ${r.status}` }, 400)
+          return json({ ok: true })
+        } catch (e) {
+          return json({ error: e.message }, 500)
+        }
+      }
     }
 
     // ============== ADMIN SEED (lead admin only, idempotent-ish) ==============

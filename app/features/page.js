@@ -13,7 +13,7 @@ import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuLabel } from '@/components/ui/dropdown-menu'
-import { ChevronUp, MoreHorizontal, Plus, Pin, Trash2, MessageSquare, Filter } from 'lucide-react'
+import { ChevronUp, MoreHorizontal, Plus, Pin, Trash2, MessageSquare, Filter, Search } from 'lucide-react'
 import { BUNDLE_MODULES, PRIORITIES, STATUSES, PRIORITY_COLORS, STATUS_COLORS, STATUS_LABELS } from '@/lib/constants/modules'
 import { toast } from 'sonner'
 
@@ -33,6 +33,7 @@ function FeaturesContent() {
   const [filterModule, setFilterModule] = useState('all')
   const [filterClaim, setFilterClaim] = useState('all')
   const [sort, setSort] = useState('newest')
+  const [search, setSearch] = useState('')
   const [openNew, setOpenNew] = useState(false)
   const isAdmin = me?.role === 'admin' || me?.role === 'lead_admin'
 
@@ -43,6 +44,16 @@ function FeaturesContent() {
     if (filterModule !== 'all') arr = arr.filter(f => f.module === filterModule)
     if (filterClaim === 'claimed') arr = arr.filter(f => f.claimed_by)
     if (filterClaim === 'unclaimed') arr = arr.filter(f => !f.claimed_by)
+    if (search.trim()) {
+      const q = search.trim().toLowerCase()
+      arr = arr.filter(f =>
+        f.title.toLowerCase().includes(q) ||
+        f.description.toLowerCase().includes(q) ||
+        f.module.toLowerCase().includes(q) ||
+        f.submitted_by_user?.display_name?.toLowerCase().includes(q) ||
+        f.claimed_by_user?.display_name?.toLowerCase().includes(q)
+      )
+    }
     if (sort === 'upvotes') arr.sort((a,b) => (b.upvote_count - a.upvote_count) || (b.pinned - a.pinned))
     else if (sort === 'oldest') arr.sort((a,b) => new Date(a.created_at) - new Date(b.created_at))
     else if (sort === 'priority') {
@@ -52,7 +63,7 @@ function FeaturesContent() {
     // pinned always first
     arr.sort((a,b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0))
     return arr
-  }, [features, filterStatus, filterPriority, filterModule, filterClaim, sort])
+  }, [features, filterStatus, filterPriority, filterModule, filterClaim, sort, search])
 
   async function upvote(id) {
     await fetch(`/api/features/${id}/upvote`, { method: 'POST' })
@@ -87,14 +98,21 @@ function FeaturesContent() {
         </Dialog>
       </div>
 
-      <Card className="p-3 flex items-center gap-2 flex-wrap">
-        <Filter className="h-4 w-4 text-muted-foreground ml-1" />
-        <FilterSelect value={filterStatus} onChange={setFilterStatus} options={[{v:'all',l:'All status'}, ...STATUSES.map(s => ({v:s, l:STATUS_LABELS[s]}))]} />
-        <FilterSelect value={filterPriority} onChange={setFilterPriority} options={[{v:'all',l:'All priority'}, ...PRIORITIES.map(p => ({v:p,l:p[0].toUpperCase()+p.slice(1)}))]} />
-        <FilterSelect value={filterModule} onChange={setFilterModule} options={[{v:'all',l:'All modules'}, ...BUNDLE_MODULES.map(m => ({v:m,l:m}))]} />
-        <FilterSelect value={filterClaim} onChange={setFilterClaim} options={[{v:'all',l:'All claims'},{v:'claimed',l:'Claimed'},{v:'unclaimed',l:'Unclaimed'}]} />
-        <div className="ml-auto" />
-        <FilterSelect value={sort} onChange={setSort} options={[{v:'newest',l:'Newest'},{v:'oldest',l:'Oldest'},{v:'upvotes',l:'Most upvoted'},{v:'priority',l:'Priority'}]} />
+      <Card className="p-3 space-y-2">
+        <div className="flex items-center gap-2">
+          <Search className="h-4 w-4 text-muted-foreground ml-1 flex-shrink-0" />
+          <Input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by title, description, module, or person…" className="h-9 border-0 bg-transparent focus-visible:ring-0 focus-visible:ring-offset-0 px-0" />
+          {search && <Button variant="ghost" size="sm" onClick={() => setSearch('')} className="h-7 px-2 text-xs">Clear</Button>}
+        </div>
+        <div className="flex items-center gap-2 flex-wrap border-t border-border pt-2">
+          <Filter className="h-4 w-4 text-muted-foreground ml-1" />
+          <FilterSelect value={filterStatus} onChange={setFilterStatus} options={[{v:'all',l:'All status'}, ...STATUSES.map(s => ({v:s, l:STATUS_LABELS[s]}))]} />
+          <FilterSelect value={filterPriority} onChange={setFilterPriority} options={[{v:'all',l:'All priority'}, ...PRIORITIES.map(p => ({v:p,l:p[0].toUpperCase()+p.slice(1)}))]} />
+          <FilterSelect value={filterModule} onChange={setFilterModule} options={[{v:'all',l:'All modules'}, ...BUNDLE_MODULES.map(m => ({v:m,l:m}))]} />
+          <FilterSelect value={filterClaim} onChange={setFilterClaim} options={[{v:'all',l:'All claims'},{v:'claimed',l:'Claimed'},{v:'unclaimed',l:'Unclaimed'}]} />
+          <div className="ml-auto" />
+          <FilterSelect value={sort} onChange={setSort} options={[{v:'newest',l:'Newest'},{v:'oldest',l:'Oldest'},{v:'upvotes',l:'Most upvoted'},{v:'priority',l:'Priority'}]} />
+        </div>
       </Card>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">

@@ -276,7 +276,34 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: |
-      ### Iteration 2 — Demo seed + Per-feature page + Auto-stop 12h
+      ### Iteration 3 — Discord webhooks + Feature search + Per-dev goals editor
+
+      1. **Discord webhook notifications** — New `settings` collection (single
+         app-settings doc). Endpoints:
+           - GET  /api/settings        → returns { discord_webhook_url, notifications_enabled }
+           - PATCH /api/settings       → updates either or both
+           - POST /api/settings/test-webhook → fires a test embed to confirm wiring
+         Helper `notifyFeatureChange()` is invoked (fire-and-forget) from the feature
+         POST and PATCH handlers whenever any of these happen:
+           ✨ created · 🙌 claimed · ↩️ unclaimed · 🔨 status_change · 📌 pinned
+         Each notification is a Discord embed with status-specific color, status emoji,
+         module/priority/claimer fields, submitter as author line, actor as footer, and
+         a deep-link URL to /features/{id}. Verified by setting a dummy URL via the API
+         and triggering a status change — no errors thrown.
+
+      2. **Feature search** — Client-side search input on /features matching against
+         title, description, module, submitter name, and claimer name. Combined with
+         existing filters and sort.
+
+      3. **Per-dev goals editor** — Added "Edit goals" item to the user menu in admin
+         Team tab. Opens a dialog with daily_goal and weekly_goal number inputs.
+         PATCH /api/users/:id already supported these fields. Verified: Alex Chen's
+         goals updated from default 4/25 to 6/35 hours.
+
+      4. **New "Settings" tab in admin** — 6-column tab strip. Houses the webhook
+         config form. Future settings can live here.
+
+      Auto-stop 12h, demo seed, per-feature page, and all original features still work.
       Built on top of the MVP. Three new capabilities, all verified working:
 
       1. **Demo seed endpoint** — POST /api/admin/seed (lead_admin only, idempotent).

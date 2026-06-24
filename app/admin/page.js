@@ -1,5 +1,5 @@
 'use client'
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import useSWR from 'swr'
 import { AppShell, useMe } from '@/components/AppShell'
 import { LanyardAvatar } from '@/components/LanyardCard'
@@ -13,7 +13,8 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuLabel, DropdownMenuSeparator } from '@/components/ui/dropdown-menu'
-import { Plus, MoreHorizontal, Download, Trash2, KeyRound, UserX, UserCheck, Pin, Shield } from 'lucide-react'
+import { Switch } from '@/components/ui/switch'
+import { Plus, MoreHorizontal, Download, Trash2, KeyRound, UserX, UserCheck, Pin, Shield, Target, Webhook, CheckCircle2, Send } from 'lucide-react'
 import { BUNDLE_MODULES, PRIORITIES, STATUSES, PRIORITY_COLORS, STATUS_COLORS, STATUS_LABELS, ROLE_LABELS, ROLE_COLORS } from '@/lib/constants/modules'
 import { toast } from 'sonner'
 
@@ -34,18 +35,20 @@ function Content() {
         <Badge variant="outline" className={`ml-2 ${ROLE_COLORS[me.role]}`}>{ROLE_LABELS[me.role]}</Badge>
       </div>
       <Tabs defaultValue="overview">
-        <TabsList className="grid grid-cols-5 max-w-2xl">
+        <TabsList className="grid grid-cols-6 max-w-3xl">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="team">Team</TabsTrigger>
           <TabsTrigger value="features">Features</TabsTrigger>
           <TabsTrigger value="time">Time Logs</TabsTrigger>
           <TabsTrigger value="changelog">Changelog</TabsTrigger>
+          <TabsTrigger value="settings">Settings</TabsTrigger>
         </TabsList>
         <TabsContent value="overview"><OverviewTab /></TabsContent>
         <TabsContent value="team"><TeamTab me={me} /></TabsContent>
         <TabsContent value="features"><FeaturesAdminTab /></TabsContent>
         <TabsContent value="time"><TimeLogsTab /></TabsContent>
         <TabsContent value="changelog"><ChangelogTab /></TabsContent>
+        <TabsContent value="settings"><SettingsTab /></TabsContent>
       </Tabs>
     </div>
   )
@@ -175,6 +178,7 @@ function RegisterUserDialog({ isLead, onCreated }) {
 
 function UserMenu({ user, me, onChanged }) {
   const [openPwd, setOpenPwd] = useState(false)
+  const [openGoals, setOpenGoals] = useState(false)
   const isLead = me.role === 'lead_admin'
   if (user.role === 'lead_admin') return <Badge variant="outline" className="text-[10px]">Protected</Badge>
   if (user.role === 'admin' && !isLead) return null
@@ -192,6 +196,7 @@ function UserMenu({ user, me, onChanged }) {
       <DropdownMenu>
         <DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
         <DropdownMenuContent align="end">
+          <DropdownMenuItem onClick={() => setOpenGoals(true)}><Target className="h-3.5 w-3.5 mr-2" /> Edit goals</DropdownMenuItem>
           <DropdownMenuItem onClick={() => setOpenPwd(true)}><KeyRound className="h-3.5 w-3.5 mr-2" /> Reset password</DropdownMenuItem>
           <DropdownMenuItem onClick={toggleActive}>{user.active ? <><UserX className="h-3.5 w-3.5 mr-2" /> Deactivate</> : <><UserCheck className="h-3.5 w-3.5 mr-2" /> Reactivate</>}</DropdownMenuItem>
           {isLead && user.role !== 'lead_admin' && <><DropdownMenuSeparator /><DropdownMenuItem onClick={remove} className="text-red-300"><Trash2 className="h-3.5 w-3.5 mr-2" /> Remove user</DropdownMenuItem></>}
@@ -200,7 +205,32 @@ function UserMenu({ user, me, onChanged }) {
       <Dialog open={openPwd} onOpenChange={setOpenPwd}>
         <ResetPwdDialog user={user} onDone={() => { setOpenPwd(false); onChanged() }} />
       </Dialog>
+      <Dialog open={openGoals} onOpenChange={setOpenGoals}>
+        <GoalsDialog user={user} onDone={() => { setOpenGoals(false); onChanged() }} />
+      </Dialog>
     </>
+  )
+}
+
+function GoalsDialog({ user, onDone }) {
+  const [daily, setDaily] = useState(user.daily_goal ?? 4)
+  const [weekly, setWeekly] = useState(user.weekly_goal ?? 25)
+  async function save() {
+    const r = await fetch(`/api/users/${user.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ daily_goal: Number(daily), weekly_goal: Number(weekly) }) })
+    if (r.ok) { toast.success(`Goals updated for ${user.display_name}`); onDone() } else { toast.error('Failed') }
+  }
+  return (
+    <DialogContent>
+      <DialogHeader><DialogTitle>Edit goals — {user.display_name}</DialogTitle></DialogHeader>
+      <div className="space-y-3">
+        <div className="text-xs text-muted-foreground">Hours per day / week. These power the progress bars on the dashboard.</div>
+        <div className="grid grid-cols-2 gap-3">
+          <div><Label>Daily goal (hours)</Label><Input type="number" min="0" step="0.5" value={daily} onChange={e => setDaily(e.target.value)} /></div>
+          <div><Label>Weekly goal (hours)</Label><Input type="number" min="0" step="0.5" value={weekly} onChange={e => setWeekly(e.target.value)} /></div>
+        </div>
+      </div>
+      <DialogFooter><Button onClick={save}>Save goals</Button></DialogFooter>
+    </DialogContent>
   )
 }
 
@@ -408,5 +438,77 @@ function NewChangelogDialog({ shippedFeatures, onCreated }) {
       </div>
       <DialogFooter><Button onClick={save}>Publish</Button></DialogFooter>
     </DialogContent>
+  )
+}
+
+
+function SettingsTab() {
+  const { data, mutate } = useSWR('/api/settings', fetcher)
+  const s = data?.settings
+  const [url, setUrl] = useState('')
+  const [enabled, setEnabled] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+
+  // Sync state when settings load
+  useEffect(() => {
+    if (s) {
+      setUrl(s.discord_webhook_url || '')
+      setEnabled(s.notifications_enabled !== false)
+    }
+  }, [s?.discord_webhook_url, s?.notifications_enabled])
+
+  async function save() {
+    setSaving(true)
+    const r = await fetch('/api/settings', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ discord_webhook_url: url.trim(), notifications_enabled: enabled }) })
+    setSaving(false)
+    if (r.ok) { toast.success('Settings saved'); mutate() } else { toast.error('Failed to save') }
+  }
+  async function testWebhook() {
+    setTesting(true)
+    const r = await fetch('/api/settings/test-webhook', { method: 'POST' })
+    setTesting(false)
+    if (r.ok) toast.success('Test message sent to Discord ✓')
+    else { const d = await r.json(); toast.error(d.error || 'Test failed') }
+  }
+
+  return (
+    <div className="space-y-4 mt-4">
+      <Card className="p-6">
+        <div className="flex items-center gap-3 mb-1">
+          <Webhook className="h-5 w-5 text-primary" />
+          <h2 className="text-base font-semibold">Discord Webhook Notifications</h2>
+        </div>
+        <p className="text-sm text-muted-foreground mb-5">Get notified in your Discord channel when feature requests are submitted, claimed, change status, or get pinned. Set up a webhook in your Discord server settings and paste the URL below.</p>
+        <div className="space-y-4">
+          <div>
+            <Label>Webhook URL</Label>
+            <Input value={url} onChange={e => setUrl(e.target.value)} placeholder="https://discord.com/api/webhooks/..." className="font-mono text-sm" type="password" />
+            <p className="text-xs text-muted-foreground mt-1.5">Server Settings → Integrations → Webhooks → New Webhook → Copy Webhook URL</p>
+          </div>
+          <div className="flex items-center justify-between p-3 rounded-md bg-secondary/40 border border-border">
+            <div>
+              <div className="text-sm font-medium">Enable notifications</div>
+              <div className="text-xs text-muted-foreground">Turn off to silence all webhook deliveries without removing the URL</div>
+            </div>
+            <Switch checked={enabled} onCheckedChange={setEnabled} />
+          </div>
+          <div className="flex items-center gap-2">
+            <Button onClick={save} disabled={saving}><CheckCircle2 className="h-4 w-4 mr-2" />{saving ? 'Saving…' : 'Save settings'}</Button>
+            <Button variant="outline" onClick={testWebhook} disabled={testing || !s?.discord_webhook_url}><Send className="h-4 w-4 mr-2" />{testing ? 'Sending…' : 'Send test message'}</Button>
+          </div>
+          <Card className="p-4 bg-secondary/30 border-border">
+            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Notification triggers</div>
+            <ul className="text-xs space-y-1 text-muted-foreground">
+              <li>✨ New feature request submitted</li>
+              <li>🙌 Feature claimed by a developer</li>
+              <li>↩️ Feature unclaimed</li>
+              <li>🔨 Status changed (Pending → Claimed → In Progress → In Review → Shipped/Rejected)</li>
+              <li>📌 Feature pinned by an admin</li>
+            </ul>
+          </Card>
+        </div>
+      </Card>
+    </div>
   )
 }
