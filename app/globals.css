@@ -1,0 +1,113 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+body {
+    margin: 0;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+code { font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New', monospace; }
+
+@layer base {
+  :root {
+    --background: 240 10% 4%;
+    --foreground: 0 0% 98%;
+    --card: 240 8% 7%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 8% 7%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 235 86% 65%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 6% 13%;
+    --secondary-foreground: 0 0% 95%;
+    --muted: 240 6% 13%;
+    --muted-foreground: 240 5% 65%;
+    --accent: 240 6% 16%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 75% 55%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 6% 15%;
+    --input: 240 6% 13%;
+    --ring: 235 86% 65%;
+    --chart-1: 235 86% 65%;
+    --chart-2: 160 60% 50%;
+    --chart-3: 30 90% 60%;
+    --chart-4: 280 70% 65%;
+    --chart-5: 340 80% 60%;
+    --radius: 0.625rem;
+    --sidebar-background: 240 12% 3%;
+    --sidebar-foreground: 240 5% 75%;
+    --sidebar-primary: 235 86% 65%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 6% 11%;
+    --sidebar-accent-foreground: 0 0% 98%;
+    --sidebar-border: 240 6% 12%;
+    --sidebar-ring: 235 86% 65%;
+  }
+  .dark {
+    --background: 240 10% 4%;
+    --foreground: 0 0% 98%;
+    --card: 240 8% 7%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 8% 7%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 235 86% 65%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 6% 13%;
+    --secondary-foreground: 0 0% 95%;
+    --muted: 240 6% 13%;
+    --muted-foreground: 240 5% 65%;
+    --accent: 240 6% 16%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 75% 55%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 6% 15%;
+    --input: 240 6% 13%;
+    --ring: 235 86% 65%;
+    --sidebar-background: 240 12% 3%;
+    --sidebar-foreground: 240 5% 75%;
+    --sidebar-primary: 235 86% 65%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 6% 11%;
+    --sidebar-accent-foreground: 0 0% 98%;
+    --sidebar-border: 240 6% 12%;
+    --sidebar-ring: 235 86% 65%;
+  }
+}
+
+@layer base {
+  * { @apply border-border; }
+  body { @apply bg-background text-foreground; }
+}
+
+/* Subtle background grid */
+.bg-grid {
+  background-image: radial-gradient(circle at 1px 1px, hsl(240 6% 14%) 1px, transparent 0);
+  background-size: 32px 32px;
+}
+
+.gradient-text {
+  background: linear-gradient(135deg, #5865F2 0%, #818cf8 50%, #c4b5fd 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.glow-blurple { box-shadow: 0 0 40px -10px rgba(88,101,242,0.45); }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.pulse-dot { animation: pulse-dot 1.6s ease-in-out infinite; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: hsl(240 6% 18%); border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: hsl(240 6% 25%); }
